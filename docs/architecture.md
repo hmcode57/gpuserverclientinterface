@@ -79,6 +79,7 @@ with the job's active lease in `X-Lease`. Anything else answers 403 `{"code": "f
 | Method and path | Body / result |
 |---|---|
 | `GET /health` | `{ok, protocol, max_file_bytes}` |
+| `POST /jobs/<id>/cancel` | producer only: queued or running → `cancelled` (never retried; the worker's next heartbeat gets `lease_lost`) |
 | `POST /jobs` | `{kind, family, params?, config?, priority?, after?, outputs?}` → job (201) |
 | `GET /jobs` | All jobs with `waiting_for` |
 | `GET /jobs/<id>` | One job |

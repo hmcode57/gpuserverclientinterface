@@ -377,6 +377,24 @@ class Store:
             self._end_run(j, error[:8000], outcome="failed")
         return self.row(job_id)
 
+    def cancel(self, job_id):
+        """Producer-only. Queued or running -> 'cancelled' (never retried). A running worker's next heartbeat
+        gets lease_lost, so it stops. Finished jobs are returned unchanged."""
+        with self.lock:
+            j = self._raw(job_id)
+            if not j:
+                raise KeyError(job_id)
+            if j["state"] in ("queued", "running"):
+                now = time.time()
+                self.db.execute("UPDATE jobs SET state='cancelled', worker=NULL, heartbeat=NULL, lease=NULL, "
+                                "updated=? WHERE id=?", (now, job_id))
+                if j["lease"]:
+                    self.db.execute("UPDATE leases SET outcome='cancelled', ended=? WHERE lease=?", (now, j["lease"]))
+                if j["worker"]:
+                    self.db.execute("UPDATE workers SET state='ready', job=NULL WHERE name=? AND job=?",
+                                    (j["worker"], job_id))
+        return self.row(job_id)
+
     def reap(self, timeout=None):
         timeout = HEARTBEAT_TIMEOUT if timeout is None else timeout
         cutoff = time.time() - timeout
@@ -713,6 +731,8 @@ def make_handler(store, token, worker_token=None):
                         return self.send(200, store.complete(jid, w, lease, b.get("score"), b.get("metrics")))
                     if p[2] == "fail":
                         return self.send(200, store.fail(jid, w, lease, str(b.get("error", "unknown"))))
+                    if p[2] == "cancel":
+                        return self.send(200, store.cancel(jid))
             raise KeyError("route")
 
         def do_GET(self): self.route("GET")

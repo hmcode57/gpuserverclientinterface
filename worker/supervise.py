@@ -5,7 +5,8 @@
   python3 worker/supervise.py --gpus auto -- --handler echo=handlers.echo:Echo
 
 Each process sees exactly one GPU (CUDA_VISIBLE_DEVICES) and is named <name>-gpu<i>, so the queue can show
-and fence each GPU separately. Load is split by the queue: every worker pulls the next job it can run, so a
+and fence each GPU separately. With --gpus all there is one process, <name>-all, that sees every GPU (for
+handlers that run torchrun themselves, like the DiLoCo trainer). Load is split by the queue: every worker pulls the next job it can run, so a
 free GPU never waits for a busy one.
 
 Restart policy, by worker exit code (see worker/runtime.py):
@@ -76,7 +77,8 @@ def main():
         i = argv.index("--")
         argv, worker_args = argv[:i], argv[i + 1:]
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--gpus", default="auto", help="auto (all visible GPUs, else one CPU worker), 0,1, or cpu")
+    ap.add_argument("--gpus", default="auto", help="auto (one worker per visible GPU, else one CPU worker), 0,1, "
+                    "cpu, or all (ONE worker that sees every GPU, for multi-GPU handlers)")
     ap.add_argument("--name", default=socket.gethostname(), help="worker name prefix")
     ap.add_argument("--minutes", type=float, default=0, help="stop all workers after this long (0 = never)")
     ap.add_argument("--max-restarts", type=int, default=5)
@@ -86,7 +88,11 @@ def main():
     for k in ("QUEUE_URL", "QUEUE_TOKEN"):
         if not os.environ.get(k):
             sys.exit(f"{k} is not set")
-    gpus = detect_gpus() if a.gpus == "auto" else a.gpus.split(",")
+    if a.gpus == "all":  # one worker that sees every GPU (multi-GPU handlers, e.g. torchrun for DiLoCo)
+        found = detect_gpus()
+        gpus = [",".join(found)] if found else []
+    else:
+        gpus = detect_gpus() if a.gpus == "auto" else a.gpus.split(",")
     if not gpus:
         log("no GPU found, starting one CPU worker")
         gpus = ["cpu"]
@@ -94,7 +100,7 @@ def main():
     results = {}
     threads = []
     for g in gpus:
-        name = f"{a.name}-{'cpu' if g == 'cpu' else 'gpu' + g}"
+        name = f"{a.name}-{'cpu' if g == 'cpu' else 'all' if ',' in g or a.gpus == 'all' else 'gpu' + g}"
         t = threading.Thread(target=run_gpu, args=(g, name, worker_args, a, stop, results), daemon=True)
         t.start()
         threads.append(t)

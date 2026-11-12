@@ -234,6 +234,10 @@ class Queue:
         self.leases.pop(job_id, None)
         return r
 
+    def cancel(self, job_id):
+        """Producer token only: stop a queued or running job for good (its worker gets lease_lost)."""
+        return self._req("POST", f"/jobs/{job_id}/cancel", {}, retries=self.retries)
+
     def forget(self, job_id):
         self.leases.pop(job_id, None)
 
