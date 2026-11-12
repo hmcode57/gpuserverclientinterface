@@ -42,7 +42,7 @@ seconds to tens of minutes each, and you want the results and state to stay on y
 | Task | Why not | Use instead |
 |---|---|---|
 | **Live or interactive serving**: chat UIs, APIs with response-time limits | The tunnel and polling add seconds of delay, and the notebook can disappear at any time | A dedicated inference host or serverless GPUs |
-| **Long training runs** (hours to days) | A retried job starts over, because jobs have no checkpoints yet (see the gaps below) | The provider's own jobs, with checkpoints |
+| **Long training runs with large checkpoints** (hours to days, multi-GB weights and optimizer state) | A job can resume after a session dies only if its handler saves checkpoints itself, and each checkpoint goes through your home connection (512 MB cap by default, held in memory). Session cuts and real crashes share one attempt limit. Small checkpoints such as LoRA adapters work well; see "Resuming long jobs" below. | The provider's own storage with framework-native resume (Hugging Face Trainer, Lightning), or a paid host |
 | **Multi-GPU training of one model** (data or tensor parallel) | Each worker runs alone on one GPU, and workers don't talk to each other | torchrun, DeepSpeed or FSDP on one machine |
 | **Gigabytes of data per job** | Every file goes through your home connection, and uploads are capped at 512 MB by default | Cloud storage, or datasets the provider hosts |
 | **Multi-user or sensitive workloads** | One shared token: anyone with it can read every job. Job data passes through Cloudflare and the provider, and the laptop is a single point of failure. | Celery, Redis or Ray with proper authentication |
@@ -58,8 +58,10 @@ seconds to tens of minutes each, and you want the results and state to stay on y
 
 In order of value:
 
-1. **Checkpoints for resuming jobs.** Let a handler upload a checkpoint file, and have a retried run download
-   it and continue. This would make long training runs feasible.
+1. **Built-in checkpoint support.** Resuming already works by hand (see "Resuming long jobs" below), but
+   `ctx.checkpoint()` and `ctx.resume()` helpers would make it one line each. Large checkpoints would also
+   need streaming uploads (not held in memory), and session cuts would need to count separately from real
+   crashes, so retrying expected cuts many times doesn't also retry genuine bugs many times.
 2. **Batch submission and bulk download.** A `submit.py --batch jobs.jsonl` command, and a way to fetch all
    results at once, for runs with thousands of jobs.
 3. **Separate tokens for workers and producers.** Then a token leaked from a notebook can't read or submit
@@ -155,6 +157,28 @@ Start workers with `--handler llm=my_handlers.llm:Generate --opt model=gpt2`, th
 `progress(**fields)` and `check()`. Full reference: [docs/architecture.md](docs/architecture.md#handlers).
 Two examples ship with the repo: `worker/handlers/echo.py` (no dependencies) and
 `worker/handlers/torch_matmul.py` (a GPU benchmark reporting TFLOPS).
+
+## Resuming long jobs
+
+Files a worker uploads stay attached to the job when it's requeued, so a handler can resume after a
+notebook session dies:
+
+```python
+def run(self, job, ctx):
+    state = self.fresh_state()
+    if "ckpt.pt" in job["files"]:                 # an earlier run of this job saved one
+        state = self.restore(ctx.input("ckpt.pt"))
+    for step in range(state.step, ctx.params["steps"]):
+        self.train_step(state)
+        ctx.check()                               # stop if the queue gave the job to someone else
+        if step % 500 == 0:
+            ctx.output("ckpt.pt", self.save(state))   # model, optimizer, scheduler, RNG, data position
+    ctx.output("model.safetensors", self.export(state))
+```
+
+Raise the attempt limit for this (`QUEUE_MAX_ATTEMPTS=20` on the laptop), because every session cut counts
+as one attempt. Keep checkpoints under `QUEUE_MAX_FILE_MB` (512 MB by default). Each checkpoint goes through
+your connection, and the laptop has to stay on.
 
 ## Layout
 
