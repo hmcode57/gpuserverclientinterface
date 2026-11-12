@@ -1,0 +1,4 @@
+{
+  "_note": "Example immutable config. Submit with --config example@1; workers read it with ctx.config(). Never edit a published version: copy it to v2.json.",
+  "greeting": "hello from configs/example/v1.json"
+}

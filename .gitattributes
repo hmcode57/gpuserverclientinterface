@@ -1,0 +1,10 @@
+# Keep text files consistent across Linux, macOS, and Windows checkouts.
+* text=auto eol=lf
+
+# Project fixtures and generated media must never undergo text conversion.
+*.glb binary
+*.mp4 binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.safetensors binary

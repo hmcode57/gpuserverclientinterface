@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Runtime state: queue database, job files, reports, bundle, token and tunnel logs
+data/
+run/
+session_out/
+*.part
+
+# Local credentials and editor/OS files
+.env
+.env.*
+*.pem
+*.key
+.idea/
+.vscode/
+.DS_Store
+.directory
