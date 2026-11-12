@@ -15,9 +15,9 @@ and keeps time to upload the reports.
 
   python tools/notebook/session.py --phases preflight,install,workers --requirements worker/requirements.txt \
       --worker-args "--handler echo=handlers.echo:Echo" --worker-minutes 30
-Env: QUEUE_URL, QUEUE_TOKEN (from the provider's secrets).
+Env: QUEUE_URL, QUEUE_TOKEN (from the provider's secrets), optional QUEUE_URL_SOURCE (see worker/client.py).
 """
-import argparse, json, os, platform, shlex, socket, subprocess, sys, threading, time, traceback, urllib.request
+import argparse, json, os, platform, secrets, shlex, socket, subprocess, sys, threading, time, traceback, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
@@ -64,7 +64,9 @@ def gpu_ids():
 class Session:
     def __init__(self, a):
         self.a = a
-        self.id = a.session or time.strftime("nb-%Y%m%d-%H%M%S")
+        # random suffix: notebooks started in the same second (several sessions or accounts) must not share
+        # worker names, or the queue's worker view mixes them up
+        self.id = a.session or time.strftime("nb-%Y%m%d-%H%M%S-") + secrets.token_hex(2)
         self.out = os.path.abspath(a.out)
         os.makedirs(self.out, exist_ok=True)
         self.q = Queue(os.environ["QUEUE_URL"], os.environ["QUEUE_TOKEN"], f"{self.id}-driver")
@@ -266,7 +268,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--phases", default="preflight,install,workers", help="comma list, in order")
     ap.add_argument("--cmd", action="append", default=[], help='custom phase: name="shell command" (repeatable)')
-    ap.add_argument("--session")
+    ap.add_argument("--session", help="session id, also the worker name prefix; must be unique across notebooks "
+                    "(default: nb-<timestamp>-<random>)")
     ap.add_argument("--out", default="session_out")
     ap.add_argument("--requirements", help="pip requirements file for the install phase (relative to the bundle)")
     ap.add_argument("--worker-args", default="--handler echo=handlers.echo:Echo", help="worker/runtime.py args")

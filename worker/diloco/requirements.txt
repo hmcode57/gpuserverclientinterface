@@ -1,0 +1,4 @@
+# DiLoCo LoRA recipe, installed by the notebook's install phase. torch and transformers come with the
+# Kaggle/Colab image (keep torch out of here). Add bitsandbytes for cfg.load_in_4bit.
+peft>=0.13
+datasets>=3.0

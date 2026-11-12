@@ -43,9 +43,9 @@ seconds to tens of minutes each, and you want the results and state to stay on y
 |---|---|---|
 | **Live or interactive serving**: chat UIs, APIs with response-time limits | The tunnel and polling add seconds of delay, and the notebook can disappear at any time | A dedicated inference host or serverless GPUs |
 | **Long training runs with large checkpoints** (hours to days, multi-GB weights and optimizer state) | A job can resume after a session dies only if its handler saves checkpoints itself, and each checkpoint goes through your home connection (512 MB cap by default, held in memory). Session cuts and real crashes share one attempt limit. Small checkpoints such as LoRA adapters work well; see "Resuming long jobs" below. | The provider's own storage with framework-native resume (Hugging Face Trainer, Lightning), or a paid host |
-| **Multi-GPU training of one model** (data or tensor parallel) | Each worker runs alone on one GPU, and workers don't talk to each other | torchrun, DeepSpeed or FSDP on one machine |
+| **Tightly synchronized training of one model across sessions** (per-step data or tensor parallel) | Sessions can't reach each other, and the tunnel adds seconds per round trip. LoRA fine-tuning across sessions *is* supported with DiLoCo (below), which syncs every few hundred steps | torchrun, DeepSpeed or FSDP on one machine |
 | **Gigabytes of data per job** | Every file goes through your home connection, and uploads are capped at 512 MB by default | Cloud storage, or datasets the provider hosts |
-| **Multi-user or sensitive workloads** | One shared token: anyone with it can read every job. Job data passes through Cloudflare and the provider, and the laptop is a single point of failure. | Celery, Redis or Ray with proper authentication |
+| **Multi-user or sensitive workloads** | Only two coarse tokens: anyone with the producer token can read every job, and worker-token holders see the inputs of jobs they run. Job data passes through Cloudflare and the provider, and the laptop is a single point of failure. | Celery, Redis or Ray with proper authentication |
 | **Very small jobs** (milliseconds each) | Several HTTP round trips through the tunnel per job, so the overhead is bigger than the work | Batch them into bigger jobs inside your handler |
 
 ### Compared with other tools
@@ -64,11 +64,9 @@ In order of value:
    crashes, so retrying expected cuts many times doesn't also retry genuine bugs many times.
 2. **Batch submission and bulk download.** A `submit.py --batch jobs.jsonl` command, and a way to fetch all
    results at once, for runs with thousands of jobs.
-3. **Separate tokens for workers and producers.** Then a token leaked from a notebook can't read or submit
-   jobs.
-4. **Cleanup of finished jobs.** `data/files/` currently grows forever. It needs a retention setting or a
+3. **Cleanup of finished jobs.** `data/files/` currently grows forever. It needs a retention setting or a
    prune command.
-5. **A real GPU run.** The multi-GPU path and the `torch_matmul` handler haven't been run on GPUs yet. One
+4. **A real GPU run.** The multi-GPU path and the `torch_matmul` handler haven't been run on GPUs yet. One
    Kaggle T4 x2 session would confirm them.
 
 ## What it handles for you
@@ -126,6 +124,20 @@ python3 laptop/submit.py --get <job id> result.json
 
 Step-by-step Kaggle and Colab instructions, the CLI-driven Kaggle runner and provider gotchas are in
 [docs/notebooks.md](docs/notebooks.md).
+
+### Training one LoRA adapter across sessions
+
+`laptop/diloco_train.py` trains one LoRA adapter on several sessions at once with DiLoCo: inside a session
+both GPUs run DDP under torchrun, and sessions sync every few hundred steps through Cloudflare R2 via presigned
+URLs, so weights never touch your home connection. Sessions can die, stall or join mid-run. Details,
+R2 setup and settings in [docs/diloco.md](docs/diloco.md).
+
+### Several notebooks at once
+
+Run the same cell in as many notebooks as you like (several Kaggle T4 x2 sessions, Colab, teammates'
+accounts); every worker pulls from the same queue. Give each notebook its own `--session`, give notebooks you
+don't fully trust the restricted `run/worker_token`, and use a named tunnel or `QUEUE_URL_GIST` so a laptop
+restart doesn't strand them. Details in [docs/multi-session.md](docs/multi-session.md).
 
 ## Writing a handler
 
@@ -185,9 +197,13 @@ your connection, and the laptop has to stay on.
 | Path | What it is |
 |---|---|
 | `laptop/queue_server.py` | The queue: HTTP API, SQLite state, file store, lease and heartbeat logic |
-| `laptop/start.sh` | Starts the queue and a Cloudflare quick tunnel, prints `QUEUE_URL` |
+| `laptop/start.sh` | Starts the queue and a Cloudflare tunnel (quick or named), creates both tokens, prints `QUEUE_URL`, optionally publishes it to a gist |
 | `laptop/submit.py` | CLI: submit jobs with files, list jobs and workers, download results |
 | `laptop/make_bundle.py` | Packs the code notebooks download (`GET /bundle`) |
+| `laptop/diloco_train.py` | DiLoCo driver: schedules rounds of LoRA training across sessions, resumable |
+| `laptop/objstore.py` | R2/S3 presigned URLs (SigV4, stdlib only) |
+| `worker/diloco/` | DiLoCo handler, torch inner loop (torchrun), outer step, recipes (HF + PEFT LoRA, toy) |
+| `examples/diloco/` | Example DiLoCo recipe config |
 | `worker/client.py` | Queue client for workers, the CLI and your own code (stdlib only) |
 | `worker/runtime.py` | Long-lived worker: claim loop, heartbeats, handler loading and swapping, metrics, exit codes |
 | `worker/supervise.py` | One worker per GPU, restart on crash |
@@ -197,7 +213,7 @@ your connection, and the laptop has to stay on.
 | `tools/public_tunnel_acceptance.sh` | End-to-end test through a real Cloudflare tunnel |
 | `configs/` | Immutable versioned job configs |
 | `tests/` | Queue, protocol-hardening and runtime tests |
-| `docs/` | Architecture and protocol reference, notebook guide |
+| `docs/` | Architecture and protocol reference, notebook guide, multi-session guide, DiLoCo guide |
 
 ## Tests
 
@@ -205,14 +221,18 @@ your connection, and the laptop has to stay on.
 python3 tests/test_queue.py            # queue behaviour over real HTTP
 python3 tests/test_queue_hardening.py  # leases, retries, limits, timeouts, traversal
 python3 tests/test_runtime.py          # worker runtime + supervisor (CPU only)
+python3 tests/test_multi_session.py    # worker token, URL discovery, unique session ids
+python3 tests/test_diloco.py           # DiLoCo math + end-to-end on CPU (needs torch; skips without it)
 bash tools/public_tunnel_acceptance.sh # through a real Cloudflare quick tunnel (needs cloudflared + internet)
 ```
 
 ## Limits
 
-- **One shared token.** Laptop and workers use the same token, so any token holder can read every job. Keep it
-  in the provider's secrets, rotate it by deleting `run/token`, and don't share notebooks that contain it.
+- **Two tokens, coarse permissions.** `run/token` can do everything. `run/worker_token` can't list, read or
+  submit jobs, but it can claim any job and read that job's inputs. Keep both in the provider's secrets,
+  rotate them by deleting the files, and don't share notebooks that contain them.
 - **One laptop.** The queue is a single process with SQLite; it's built for one person's GPU sessions, not a
   multi-tenant cluster.
-- **Quick-tunnel URLs change** on every `start.sh`; update `QUEUE_URL` in the notebook cell (the Kaggle
-  runner does this automatically).
+- **Quick-tunnel URLs change** on every `start.sh`. Use a named tunnel (`TUNNEL_NAME`/`TUNNEL_HOSTNAME`) or
+  publish the URL to a gist (`QUEUE_URL_GIST` + `QUEUE_URL_SOURCE`) so running notebooks follow it; otherwise
+  update `QUEUE_URL` in the cell (the Kaggle runner does this automatically).

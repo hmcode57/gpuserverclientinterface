@@ -12,8 +12,10 @@ cat run/token                         # -> the QUEUE_TOKEN secret. Never paste i
 `start.sh` needs `python3`, `openssl`, `curl` and
 [`cloudflared`](https://github.com/cloudflare/cloudflared/releases) on your PATH. It creates `run/token` once,
 restarts the queue and tunnel, waits until the public address really answers, and writes it to `run/url`.
-**The quick-tunnel address changes every time `start.sh` runs.** The token stays the same until you delete
-`run/token`.
+**The quick-tunnel address changes every time `start.sh` runs** (unless you use a named tunnel or publish
+it to a gist, see [multi-session.md](multi-session.md)). The tokens stay the same until you delete
+`run/token` / `run/worker_token`. Running several notebooks at once is covered in
+[multi-session.md](multi-session.md).
 
 Keep the laptop awake and online while notebooks are working. If it goes offline, workers keep retrying
 their claims with their models loaded; running jobs are requeued if their heartbeats can't get through for

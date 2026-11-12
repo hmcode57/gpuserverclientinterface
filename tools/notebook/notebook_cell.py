@@ -1,7 +1,13 @@
 # One notebook cell (Kaggle or Colab). Settings: a GPU accelerator, Internet ON.
-# Secrets (provider's secrets feature, NOT in this cell): QUEUE_TOKEN = contents of run/token on the laptop.
+# Secrets (provider's secrets feature, NOT in this cell): QUEUE_TOKEN = contents of run/token on the laptop,
+# or of run/worker_token for notebooks on accounts you don't fully trust (it can't list, read or submit jobs).
 # Downloads the code bundle from the laptop queue (laptop/make_bundle.py) and runs tools/notebook/session.py.
 QUEUE_URL = "https://PASTE-THE-ADDRESS-FROM-laptop/start.sh.trycloudflare.com"   # changes every tunnel restart
+# Optional: where to look up the current URL, so this cell and its workers survive a laptop tunnel restart.
+# e.g. "https://api.github.com/gists/<id>" (laptop/start.sh updates it when QUEUE_URL_GIST is set). Wins over
+# QUEUE_URL when it answers. Leave "" to use QUEUE_URL only.
+QUEUE_URL_SOURCE = ""
+# Give every notebook its own --session (e.g. kaggleA, kaggleB): it prefixes the worker names on the laptop.
 SESSION_ARGS = '--phases preflight,workers --worker-args "--handler echo=handlers.echo:Echo" --budget-minutes 20'
 
 import os, subprocess, sys, tarfile, io, urllib.request
@@ -33,6 +39,19 @@ if not token:
         "QUEUE_TOKEN was not available. In Kaggle open Add-ons > Secrets, create or attach a secret named "
         "exactly QUEUE_TOKEN, paste the contents of the laptop run/token file as its value, then run this cell again. "
         "Do not paste the token into this notebook. Detail: " + detail)
+if QUEUE_URL_SOURCE:
+    import json, re
+    try:
+        r = urllib.request.urlopen(urllib.request.Request(QUEUE_URL_SOURCE, headers={"User-Agent": "gpuq-client"}),
+                                   timeout=20).read().decode()
+        if r.lstrip().startswith("{"):  # GitHub gist API: file "queue_url", else the first file
+            fs = json.loads(r)["files"]
+            r = (fs.get("queue_url") or next(iter(fs.values())))["content"]
+        QUEUE_URL = re.search(r"https://[A-Za-z0-9.-]+(?::\d+)?", r).group(0)  # https only: the token goes there
+        print("QUEUE_URL from QUEUE_URL_SOURCE:", QUEUE_URL)
+    except Exception as e:
+        print(f"QUEUE_URL_SOURCE unreadable ({type(e).__name__}: {e}), using QUEUE_URL")
+    os.environ["QUEUE_URL_SOURCE"] = QUEUE_URL_SOURCE  # workers re-read it if the tunnel moves
 os.environ["QUEUE_URL"], os.environ["QUEUE_TOKEN"] = QUEUE_URL.rstrip("/"), token
 req = urllib.request.Request(QUEUE_URL.rstrip("/") + "/bundle", headers={"Authorization": f"Bearer {token}"})
 work = "/kaggle/working" if os.path.isdir("/kaggle/working") else os.getcwd()

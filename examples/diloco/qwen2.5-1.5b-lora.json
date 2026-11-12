@@ -1,0 +1,15 @@
+{
+  "model": "Qwen/Qwen2.5-1.5B-Instruct",
+  "dataset": "HuggingFaceH4/no_robots",
+  "split": "train",
+  "messages_field": "messages",
+  "seq_len": 1024,
+  "micro_batch": 2,
+  "grad_accum": 8,
+  "lr": 2e-4,
+  "warmup": 20,
+  "lora": {"r": 16, "alpha": 32, "dropout": 0.05, "target_modules": "all-linear"},
+  "load_in_4bit": false,
+  "gradient_checkpointing": true,
+  "dtype": "float16"
+}

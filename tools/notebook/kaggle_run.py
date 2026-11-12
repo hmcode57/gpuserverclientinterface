@@ -55,14 +55,24 @@ def queue_url():
         u = open(os.path.join(ROOT, "run/url")).read().strip().rstrip("/")
     except FileNotFoundError:
         sys.exit("run/url missing: start the queue with ./laptop/start.sh first")
-    if not re.fullmatch(r"https://[a-z0-9-]+\.trycloudflare\.com", u) and "--any-url" not in sys.argv:
-        sys.exit(f"run/url does not look like a quick-tunnel URL: {u!r}")
+    # a quick tunnel (*.trycloudflare.com) or a named tunnel's hostname (TUNNEL_HOSTNAME in start.sh)
+    if not re.fullmatch(r"https://[a-z0-9-]+(\.[a-z0-9-]+)+", u) and "--any-url" not in sys.argv:
+        sys.exit(f"run/url does not look like a public https tunnel URL: {u!r}")
     return u
 
 
-def make_token_dataset(ds):
-    """Create or update a PRIVATE dataset that contains only the file QUEUE_TOKEN (= run/token)."""
-    tok = open(os.path.join(ROOT, "run/token")).read().strip()
+def url_source():
+    """run/url_source (written by start.sh when QUEUE_URL_GIST is set), or ''."""
+    try:
+        return open(os.path.join(ROOT, "run/url_source")).read().strip()
+    except FileNotFoundError:
+        return ""
+
+
+def make_token_dataset(ds, token_file="run/token"):
+    """Create or update a PRIVATE dataset that contains only the file QUEUE_TOKEN (= run/token, or
+    run/worker_token with --worker-token)."""
+    tok = open(os.path.join(ROOT, token_file)).read().strip()
     with tempfile.TemporaryDirectory() as d:
         with open(os.path.join(d, "QUEUE_TOKEN"), "w") as f:
             f.write(tok)
@@ -84,6 +94,11 @@ def push(kernel, mode, timeout, token_dataset=None, extra="", accelerator="Nvidi
         src, n = re.subn(r'^QUEUE_URL = ".*?"', f'QUEUE_URL = "{url}"', src, count=1, flags=re.M)
         if n != 1:
             sys.exit("could not find the QUEUE_URL line in notebook_cell.py")
+        if url_source():
+            src, n = re.subn(r'^QUEUE_URL_SOURCE = ".*?"', f'QUEUE_URL_SOURCE = "{url_source()}"', src, count=1,
+                             flags=re.M)
+            if n != 1:
+                sys.exit("could not find the QUEUE_URL_SOURCE line in notebook_cell.py")
         if extra:
             src, n = re.subn(r"^SESSION_ARGS = .*$", f"SESSION_ARGS = {extra!r}", src, count=1, flags=re.M)
             if n != 1:
@@ -159,6 +174,8 @@ def main():
                     "the run (API-pushed runs do not receive Kaggle secrets)")
     ap.add_argument("--make-token-dataset", action="store_true",
                     help="create/update that private dataset from run/token first")
+    ap.add_argument("--worker-token", action="store_true",
+                    help="--make-token-dataset uses run/worker_token (restricted) instead of run/token")
     ap.add_argument("--session-args", dest="extra", default="",
                     help="replace SESSION_ARGS in notebook_cell.py (tools/notebook/session.py arguments)")
     ap.add_argument("--accelerator", default="NvidiaTeslaT4", help="Kaggle accelerator for --mode run "
@@ -173,7 +190,7 @@ def main():
         if a.make_token_dataset:
             if not a.token_dataset:
                 sys.exit("--make-token-dataset needs --token-dataset <user>/<slug>")
-            make_token_dataset(a.token_dataset)
+            make_token_dataset(a.token_dataset, "run/worker_token" if a.worker_token else "run/token")
         push(a.kernel, a.mode, a.timeout, a.token_dataset, a.extra, a.accelerator)
         time.sleep(5)
     if a.logs or a.no_follow:
