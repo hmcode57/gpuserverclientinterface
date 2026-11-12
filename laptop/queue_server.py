@@ -1,6 +1,6 @@
 """Durable job queue for remote GPU workers. Stdlib only (Python 3.9+), so nothing to install or pin.
 
-Run: QUEUE_TOKEN=... python3 laptop/queue_server.py [--port 8787] [--data ./data]
+Run: QUEUE_TOKEN=... [QUEUE_WORKER_TOKEN=...] python3 laptop/queue_server.py [--port 8787] [--data ./data]
 Binds 127.0.0.1 only; expose with `cloudflared tunnel --url http://127.0.0.1:8787` (laptop/start.sh does this).
 
 Jobs are generic: `kind` (what to do), `family` (which loaded model/runtime can do it), free-form `params` JSON,
@@ -11,7 +11,11 @@ job is queued. The queue never interprets params; workers do.
 Leases (queue protocol 2): every claim returns a lease token. Heartbeat, output upload, complete and fail
 must carry it, so a worker whose job was requeued (stale process, healed network partition, reused worker
 name) can no longer touch the new run. This fences stale processes; it is not an authorization boundary
-(every holder of the shared token can still read jobs).
+(every holder of the producer token can still read jobs).
+Tokens: QUEUE_TOKEN (producer) can do everything. The optional QUEUE_WORKER_TOKEN is for notebooks you don't
+fully trust (e.g. other people's accounts): it can claim jobs, read the inputs of the job it holds a lease
+for, upload outputs, heartbeat/complete/fail, report status and session reports, and fetch the bundle and
+configs, but it cannot list or read jobs, submit, or see other jobs' files.
 Retry safety: a claim retried with the same request_id returns the same job and lease; complete/fail
 retried with the same lease return the stored result. A lost heartbeat still counts as an attempt
 ; the client recovers a lost claim response by retrying with the same request_id.
@@ -314,6 +318,13 @@ class Store:
             return j, lr, "active"
         return j, lr, lr["outcome"] or "ended"
 
+    def check_lease(self, job_id, lease):
+        """Raises unless `lease` is the active lease of `job_id` (worker-token downloads need one)."""
+        with self.lock:
+            j, _, status = self._lease(job_id, lease)
+            if status != "active":
+                raise self._lost(j, status)
+
     @staticmethod
     def _lost(j, status):
         return Conflict(f"lease {status}: job is now {j['state']}", "lease_lost", outcome=status, state=j["state"])
@@ -454,7 +465,23 @@ class Store:
                 os.unlink(tmp)
 
 
-def make_handler(store, token):
+def worker_may(method, parts):
+    """Routes the worker token may use. Everything else (listing or reading jobs, submitting, the worker
+    list) needs the producer token. Job file access is further limited to the lease holder in dispatch()."""
+    if (method, parts) in (("GET", ["health"]), ("GET", ["bundle"]), ("POST", ["workers"]), ("POST", ["claim"])):
+        return True
+    if method == "GET" and len(parts) == 2 and parts[0] == "configs":
+        return True
+    if method == "PUT" and len(parts) == 3 and parts[0] == "reports":
+        return True
+    if len(parts) == 4 and parts[0] == "jobs" and parts[2] == "files" and method in ("GET", "PUT"):
+        return True
+    return method == "POST" and len(parts) == 3 and parts[0] == "jobs" and parts[2] in ("heartbeat", "complete", "fail")
+
+
+def make_handler(store, token, worker_token=None):
+    """`token` is the full-access (producer) token. `worker_token`, if set, is a second token that can only
+    do what a notebook worker needs: see WORKER_ROUTES and the lease checks in dispatch()."""
     class H(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
         timeout = READ_TIMEOUT  # socket timeout: stalled uploads and idle keep-alive sockets free their thread
@@ -543,18 +570,28 @@ def make_handler(store, token):
             return d
 
         def authed(self):
-            got = self.headers.get("Authorization", "")
-            return hmac.compare_digest(got.encode(), f"Bearer {token}".encode())
+            """Returns 'producer', 'worker' or None. Both comparisons always run (constant time)."""
+            got = self.headers.get("Authorization", "").encode()
+            full = hmac.compare_digest(got, f"Bearer {token}".encode())
+            work = bool(worker_token) and hmac.compare_digest(got, f"Bearer {worker_token or ''}".encode())
+            return "producer" if full else "worker" if work else None
 
         def route(self, method):
             self.body_read = False
             try:
-                if not self.authed():  # never read an unauthenticated body
+                self.role = self.authed()
+                if not self.role:  # never read an unauthenticated body
                     self.send(401, {"error": "unauthorized"}, close=True)
                     if self.headers.get("Content-Length", "0") not in ("", "0"):
                         self.linger(budget_s=1.0, max_bytes=4 * CHUNK)
                     return
                 parts = [p for p in self.path.split("?")[0].split("/") if p]
+                if self.role == "worker" and not worker_may(method, parts):
+                    self.send(403, {"error": "the worker token cannot do this; use the producer token",
+                                    "code": "forbidden"}, close=True)
+                    if self.headers.get("Content-Length", "0") not in ("", "0"):
+                        self.linger(budget_s=1.0, max_bytes=4 * CHUNK)
+                    return
                 return self.dispatch(method, parts)
             except KeyError:
                 self.safe_send(404, {"error": "not found"})
@@ -643,6 +680,8 @@ def make_handler(store, token):
                     return self.send(200, store.job(jid))
                 if len(p) == 4 and p[2] == "files":
                     if m == "GET":
+                        if self.role == "worker":  # workers read inputs only of the job they hold
+                            store.check_lease(jid, self.headers.get("X-Lease"))
                         f = store.file_path(jid, p[3])
                         if not f.is_file():
                             raise KeyError(p[3])
@@ -655,6 +694,8 @@ def make_handler(store, token):
                             raise TooLarge(f"file is {n} bytes, limit {MAX_FILE_BYTES} (QUEUE_MAX_FILE_MB)")
                         lease = self.headers.get("X-Lease")
                         try:
+                            if self.role == "worker" and not lease:
+                                raise ValueError("the worker token can only upload with the run's lease (X-Lease)")
                             store.check_upload(jid, p[3], lease)
                         except (Conflict, KeyError, ValueError):
                             self.drain(n)  # refused before reading: discard so the client gets the answer
@@ -693,9 +734,11 @@ class Server(ThreadingHTTPServer):
         super().handle_error(request, client_address)
 
 
-def serve(data_dir, token, port=8787, reap_every=10.0):
+def serve(data_dir, token, port=8787, reap_every=10.0, worker_token=None):
+    if worker_token and worker_token == token:
+        raise ValueError("the worker token must differ from the producer token")
     store = Store(data_dir)
-    httpd = Server(("127.0.0.1", port), make_handler(store, token))
+    httpd = Server(("127.0.0.1", port), make_handler(store, token, worker_token))
     stop = threading.Event()
 
     def reaper():
@@ -717,8 +760,12 @@ def main():
     token = os.environ.get("QUEUE_TOKEN")
     if not token or len(token) < 16:
         sys.exit("set QUEUE_TOKEN (>=16 chars), e.g. export QUEUE_TOKEN=$(openssl rand -hex 32)")
-    httpd = serve(a.data, token, a.port)
+    worker_token = os.environ.get("QUEUE_WORKER_TOKEN") or None
+    if worker_token and (len(worker_token) < 16 or worker_token == token):
+        sys.exit("QUEUE_WORKER_TOKEN must be at least 16 chars and differ from QUEUE_TOKEN")
+    httpd = serve(a.data, token, a.port, worker_token=worker_token)
     print(f"queue on http://127.0.0.1:{a.port} data={a.data} protocol={MIN_PROTOCOL} "
+          f"worker_token={'on' if worker_token else 'off'} "
           f"max_file={MAX_FILE_BYTES >> 20}MiB read_timeout={READ_TIMEOUT:.0f}s", flush=True)
     httpd.serve_forever()
 

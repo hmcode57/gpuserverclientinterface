@@ -68,7 +68,13 @@ holder can upload. Names in `outputs` can never be written without the lease.
 
 ## 4. HTTP API
 
-All requests need `Authorization: Bearer <QUEUE_TOKEN>`. Unauthenticated bodies are never read.
+All requests need `Authorization: Bearer <token>`. Unauthenticated bodies are never read.
+
+Two tokens: `QUEUE_TOKEN` (producer) may call everything. The optional `QUEUE_WORKER_TOKEN` may only call
+`GET /health`, `GET /bundle`, `GET /configs/<ref>`, `POST /workers`, `PUT /reports/...`, `POST /claim`,
+`POST /jobs/<id>/heartbeat|complete|fail` (lease required, as always), and `GET`/`PUT /jobs/<id>/files/<name>`
+with the job's active lease in `X-Lease`. Anything else answers 403 `{"code": "forbidden"}`. See
+[multi-session.md](multi-session.md).
 
 | Method and path | Body / result |
 |---|---|
@@ -178,7 +184,12 @@ temperature, power and clocks every 2 s. After every phase `session.json` and th
 | Variable | Where | Default |
 |---|---|---|
 | `QUEUE_TOKEN` | everywhere | required, at least 16 characters |
+| `QUEUE_WORKER_TOKEN` | queue | unset (no worker token); `start.sh` sets it from `run/worker_token` |
 | `QUEUE_URL` | workers, clients | `http://127.0.0.1:8787` for `submit.py` |
+| `QUEUE_URL_SOURCE` | workers, clients | unset; file path or URL to re-read the queue URL from after transport errors |
+| `QUEUE_URL_RESOLVE_EVERY` | workers, clients | 60 s (lookup cache per machine) |
+| `TUNNEL_NAME`, `TUNNEL_HOSTNAME` | `start.sh` | unset (quick tunnel) |
+| `QUEUE_URL_GIST` | `start.sh` | unset; gist id to publish the URL to |
 | `QUEUE_HEARTBEAT_TIMEOUT` | queue | 170 s |
 | `QUEUE_MAX_ATTEMPTS` | queue | 2 |
 | `QUEUE_MAX_FILE_MB` | queue | 512 |
