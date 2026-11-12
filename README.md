@@ -21,20 +21,53 @@ The framework is model-agnostic. You write a small **handler** class for your wo
 model, a training step, a benchmark) and the framework handles transport, scheduling, retries, crash
 recovery, multi-GPU splitting and monitoring.
 
-## When to use it
+## What this framework is useful for
 
-**Good fit:** batches of independent GPU jobs that take seconds to tens of minutes each, on GPUs you don't
-control and that can vanish: image, video and audio generation, batch LLM inference, embedding or captioning
-a dataset, transcription, benchmarks, hyperparameter sweeps of short runs, multi-step pipelines. Several free
-providers can serve one queue at once.
+It pays off when **the GPU is temporary and unreliable, the work splits into independent jobs that take
+seconds to tens of minutes each, and you want the results and state to stay on your own machine**.
 
-**Poor fit:**
-- **Live serving.** Polling through a tunnel adds seconds of delay.
-- **Multi-day training.** There are no checkpoints yet, so a retried job starts over.
-- **Multi-GPU training of one model.** Workers don't talk to each other.
-- **Gigabytes per job.** Every file goes through the laptop's connection.
-- **Multi-user or sensitive workloads.** There's one shared token, and data passes through Cloudflare and the provider.
-- **Millisecond jobs.** Per-job HTTP overhead dominates, so batch them inside a handler.
+### Good fit
+
+| Task | Why it fits |
+|---|---|
+| **Batch generative media**: image or video generation, upscaling, style transfer, TTS, voice conversion | Jobs are independent with files in and out. Models are expensive to load, so they stay loaded between jobs. Long sessions die, and lost jobs are requeued. |
+| **Offline batch inference**: embedding a corpus, captioning or tagging a dataset, transcribing audio, batch LLM summarization or classification | Thousands of independent jobs spread across several free GPUs and several notebooks at once. Priority and family routing let different models share one queue. |
+| **Benchmarks and hardware checks**: comparing providers or GPUs, testing memory limits | The session driver records hardware, RAM and VRAM peaks, and the timing of each phase, and its reports survive the session dying. `torch_matmul` is a starting point. |
+| **Hyperparameter sweeps and small experiments**: many short training or fine-tuning runs of up to about an hour | One job per configuration. Configs are immutable, so runs are reproducible. A crashed run is retried once, then marked failed. |
+| **Multi-step pipelines**, such as preprocess → generate → postprocess | `after` dependencies, plus different families on different GPUs |
+| **Several free providers at once**: Kaggle, Colab and a rented box together | Every worker pulls from the same queue. There's no central scheduler to configure. |
+
+### Poor fit
+
+| Task | Why not | Use instead |
+|---|---|---|
+| **Live or interactive serving**: chat UIs, APIs with response-time limits | The tunnel and polling add seconds of delay, and the notebook can disappear at any time | A dedicated inference host or serverless GPUs |
+| **Long training runs** (hours to days) | A retried job starts over, because jobs have no checkpoints yet (see the gaps below) | The provider's own jobs, with checkpoints |
+| **Multi-GPU training of one model** (data or tensor parallel) | Each worker runs alone on one GPU, and workers don't talk to each other | torchrun, DeepSpeed or FSDP on one machine |
+| **Gigabytes of data per job** | Every file goes through your home connection, and uploads are capped at 512 MB by default | Cloud storage, or datasets the provider hosts |
+| **Multi-user or sensitive workloads** | One shared token: anyone with it can read every job. Job data passes through Cloudflare and the provider, and the laptop is a single point of failure. | Celery, Redis or Ray with proper authentication |
+| **Very small jobs** (milliseconds each) | Several HTTP round trips through the tunnel per job, so the overhead is bigger than the work | Batch them into bigger jobs inside your handler |
+
+### Compared with other tools
+
+- **Ray, Celery and Dask** are more powerful, but they expect a cluster they can reach. They don't cope well with workers that sit behind notebook firewalls and disappear.
+- **Modal and RunPod serverless** are smoother, but you pay for them.
+- **This framework's niche** is free or cheap GPUs you don't control, coordinated from your laptop, with nothing to install on the laptop.
+
+## Gaps worth closing
+
+In order of value:
+
+1. **Checkpoints for resuming jobs.** Let a handler upload a checkpoint file, and have a retried run download
+   it and continue. This would make long training runs feasible.
+2. **Batch submission and bulk download.** A `submit.py --batch jobs.jsonl` command, and a way to fetch all
+   results at once, for runs with thousands of jobs.
+3. **Separate tokens for workers and producers.** Then a token leaked from a notebook can't read or submit
+   jobs.
+4. **Cleanup of finished jobs.** `data/files/` currently grows forever. It needs a retention setting or a
+   prune command.
+5. **A real GPU run.** The multi-GPU path and the `torch_matmul` handler haven't been run on GPUs yet. One
+   Kaggle T4 x2 session would confirm them.
 
 ## What it handles for you
 
@@ -159,4 +192,3 @@ bash tools/public_tunnel_acceptance.sh # through a real Cloudflare quick tunnel 
   multi-tenant cluster.
 - **Quick-tunnel URLs change** on every `start.sh`; update `QUEUE_URL` in the notebook cell (the Kaggle
   runner does this automatically).
-- `torch_matmul.py` and multi-GPU sessions have not been run in this repository's tests; the CPU paths have.
