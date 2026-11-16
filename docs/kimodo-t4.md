@@ -26,6 +26,9 @@ kimodo_prompts.py --watch  ──► queue_server ◄──── worker gpu0 �
 
 ## Running it
 
+The full step-by-step protocol (one-time setup, web or terminal start, all ways to send prompts,
+shutdown, troubleshooting) is in [kimodo-t4-setup.md](kimodo-t4-setup.md). The short version:
+
 1. Laptop:
    ```bash
    ./laptop/start.sh

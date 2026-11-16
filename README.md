@@ -31,7 +31,8 @@ It works in two ways:
   connection ([docs/diloco.md](docs/diloco.md)).
 
 Worked example on this branch: the kimodo text encoder (Q8_0) resident on each T4 of a Kaggle T4 x2
-session, fed with prompts you submit while it runs ([docs/kimodo-t4.md](docs/kimodo-t4.md)).
+session, fed with prompts you submit while it runs ([docs/kimodo-t4.md](docs/kimodo-t4.md); setup and use step by step:
+[docs/kimodo-t4-setup.md](docs/kimodo-t4-setup.md)).
 
 ## What this framework is useful for
 
