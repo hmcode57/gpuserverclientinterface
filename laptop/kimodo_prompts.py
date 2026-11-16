@@ -1,16 +1,20 @@
 """Send kimodo prompts to the queue at any time during a session and collect the embeddings.
 
 The Kaggle workers keep their encoders loaded and keep pulling jobs, so new prompts can be added whenever you
-like. Each job holds a batch of prompts (one HTTP round trip per job, ~50 ms of GPU per prompt).
+like. By default each prompt is its own job, so it arrives as its own <job>.f32/.json pair as soon as it is
+encoded. --batch N packs N prompts into one job (fewer tunnel round trips; ~50 ms of GPU per prompt).
 
   # one-off: submit, wait, write embeddings to out/
   python3 laptop/kimodo_prompts.py "a person walks forward and waves" "someone jumps twice" --wait
 
-  # a file, 32 prompts per job
+  # a file, one job (and one result file pair) per prompt
+  python3 laptop/kimodo_prompts.py --file prompts.txt --wait
+
+  # a large file, 32 prompts per job (faster overall, one result file pair per 32 prompts)
   python3 laptop/kimodo_prompts.py --file prompts.txt --batch 32 --wait
 
   # continuous: every line typed or piped in becomes a prompt; flushed per --batch or after --flush s quiet
-  tail -f new_prompts.txt | python3 laptop/kimodo_prompts.py --watch
+  tail -n 0 -F new_prompts.txt | python3 laptop/kimodo_prompts.py --watch
 
   # continuous: every *.txt dropped into inbox/ becomes a job (one prompt per line); moved to inbox/sent/
   python3 laptop/kimodo_prompts.py --watch-dir inbox/
@@ -137,7 +141,8 @@ def main():
     ap.add_argument("prompts", nargs="*")
     ap.add_argument("--url", default=os.environ.get("QUEUE_URL", "http://127.0.0.1:8787"))
     ap.add_argument("--file", help="one prompt per line")
-    ap.add_argument("--batch", type=int, default=32, help="prompts per job (default 32)")
+    ap.add_argument("--batch", type=int, default=1,
+                    help="prompts per job (default 1: one result file pair per prompt)")
     ap.add_argument("--priority", type=int, default=0)
     ap.add_argument("--out", default=os.path.join(ROOT, "data/kimodo_embeddings"))
     ap.add_argument("--wait", action="store_true", help="wait for the jobs and download their embeddings")

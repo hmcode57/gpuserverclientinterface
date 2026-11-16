@@ -31,10 +31,17 @@ git checkout kimodo-t4
 
 ### 1.3 Queue token
 
-Start the queue once (step 2.1); it creates the token in `run/token`. Then put it where Kaggle can read it:
+Start the queue once (step 2.1); it creates the token in `run/token`. Show it with:
 
-- **Web notebook (Part 3A):** Kaggle notebook → *Add-ons → Secrets* → add `QUEUE_TOKEN` with the full contents
-  of `run/token`, and switch it **on** for this notebook.
+```bash
+cat run/token
+```
+
+The token stays the same between sessions. Put it where Kaggle can read it:
+
+- **Web notebook (Part 3A):** in the Kaggle notebook editor open *Add-ons → Secrets → Add secret*.
+  Label: `QUEUE_TOKEN` (exactly), value: the line printed by `cat run/token`. Then switch it **on** for this
+  notebook (every new notebook needs it switched on).
 - **Terminal runs (Part 3B):** secrets don't reach API-pushed runs, so `kaggle_run.py` puts the token in a
   **private** dataset for you (`--make-token-dataset`, step 3B.2).
 
@@ -81,19 +88,32 @@ The notebook downloads this bundle from the queue at start. Rebuild it whenever 
 
 ---
 
+Do **either** Part 3A (browser) **or** Part 3B (terminal), not both. Two sessions with the same `--session`
+name (`kaggleA`) at once clash; a second notebook needs its own name (`kaggleB`).
+
 ## Part 3A: start the Kaggle session from the web
 
 1. Create a new notebook on kaggle.com. Settings: **Accelerator: GPU T4 x2**, **Internet: on**.
 2. Make sure the `QUEUE_TOKEN` secret is attached (1.3).
-3. Paste the whole of `tools/notebook/notebook_cell.py` into one cell. Change two lines at the top:
-   ```python
-   QUEUE_URL = "https://<the address from cat run/url>"
-   SESSION_ARGS = ('--session kaggleA --phases preflight,kimodo,workers '
-                   '--cmd "kimodo=bash worker/kimodo/setup.sh" '
-                   '--worker-args "--handler kimodo=handlers.kimodo_encode:KimodoEncode" '
-                   '--budget-minutes 540')
-   ```
-4. Run the cell and leave the tab open (or use *Save Version → Save & Run All* to run without the tab).
+3. Open `tools/notebook/notebook_cell.py` on the laptop, copy all of it and paste it into one cell of the
+   *Kaggle notebook*. (`SESSION_ARGS` is in this file, not in `session.py`; don't edit `session.py`.)
+4. **In the Kaggle cell** (this is Python, don't run it in a terminal), change two lines near the top:
+   - line 5, `QUEUE_URL = "https://PASTE-THE-ADDRESS-..."`: put the address from `cat run/url` between the quotes:
+     ```python
+     QUEUE_URL = "https://<random>.trycloudflare.com"
+     ```
+   - line 11, `SESSION_ARGS = '--phases preflight,workers --worker-args "--handler echo=handlers.echo:Echo" --budget-minutes 20'`
+     (the echo test): replace that whole line with:
+     ```python
+     SESSION_ARGS = ('--session kaggleA --phases preflight,kimodo,workers '
+                     '--cmd "kimodo=bash worker/kimodo/setup.sh" '
+                     '--worker-args "--handler kimodo=handlers.kimodo_encode:KimodoEncode" '
+                     '--budget-minutes 540')
+     ```
+5. Run the cell and leave the tab open (or use *Save Version → Save & Run All* to run without the tab).
+
+Kaggle keeps the cell with the notebook. Next time only `QUEUE_URL` needs changing, and only if `start.sh`
+was restarted (the address changes then).
 
 Continue with Part 4.
 
@@ -101,24 +121,47 @@ Continue with Part 4.
 
 ### 3B.1 Kaggle CLI token (once)
 
-kaggle.com → Settings → *API* → create a token, then save it as `~/.kaggle/access_token`
-(`chmod 600 ~/.kaggle/access_token`).
+Already set up if this prints your username:
+
+```bash
+kaggle config view
+```
+
+Otherwise: kaggle.com → Settings → *API* → create a token, save it as `~/.kaggle/access_token`, then run:
+
+```bash
+chmod 600 ~/.kaggle/access_token
+```
+
+Then set your Kaggle username for the commands below (the `username:` from `kaggle config view`). Do this in
+every new terminal:
+
+```bash
+KUSER=your-kaggle-username
+```
 
 ### 3B.2 Check the connection (CPU, takes about a minute)
 
 ```bash
-python3 tools/notebook/kaggle_run.py --kernel <kaggle-user>/kimodo-t4 --mode probe \
-    --token-dataset <kaggle-user>/gpuq-token --make-token-dataset
+python3 tools/notebook/kaggle_run.py --kernel $KUSER/kimodo-t4 --mode probe \
+    --token-dataset $KUSER/gpuq-token --make-token-dataset
 ```
 
 `/health 200` and `/bundle 200` in the output mean the notebook can reach your laptop.
 `/health 401` means the token is wrong; a connection error means the tunnel is down (rerun 2.1).
 
+Normal in the probe output, ignore it:
+- `PROBE secret error: ConnectionError ...`: API-pushed runs get no secrets; the next line shows the token
+  was read from the dataset instead.
+- debugger warnings, `SyntaxWarning`, `NbConvertApp` lines: Kaggle's own noise.
+
+The probe ends with `status COMPLETE` and starts no workers. Continue with 3B.3.
+
 ### 3B.3 Start the GPU session
 
 ```bash
-python3 tools/notebook/kaggle_run.py --kernel <kaggle-user>/kimodo-t4 --mode run \
-    --token-dataset <kaggle-user>/gpuq-token \
+python3 tools/notebook/kaggle_run.py --kernel $KUSER/kimodo-t4 --mode run \
+    --token-dataset $KUSER/gpuq-token \
     --session-args '--session kaggleA --phases preflight,kimodo,workers --cmd "kimodo=bash worker/kimodo/setup.sh" --worker-args "--handler kimodo=handlers.kimodo_encode:KimodoEncode" --budget-minutes 540'
 ```
 
@@ -126,7 +169,7 @@ It pushes the notebook (T4 x2, `QUEUE_URL` filled in from `run/url`), starts it 
 `Ctrl-C` only stops following; the session keeps running. Later:
 
 ```bash
-python3 tools/notebook/kaggle_run.py --kernel <kaggle-user>/kimodo-t4 --logs
+python3 tools/notebook/kaggle_run.py --kernel $KUSER/kimodo-t4 --logs
 ```
 
 ---
@@ -157,8 +200,10 @@ You can submit prompts (Part 5) before the workers are ready; they wait in the q
 
 ## Part 5: use it
 
-All results go to `data/kimodo_embeddings/` (change with `--out DIR`): `<job>.f32` holds the embeddings,
-`<job>.json` the prompts in the same row order.
+All results go to `data/kimodo_embeddings/` (change with `--out DIR`), downloaded as soon as each job is done:
+`<job>.f32` holds the embeddings, `<job>.json` the prompts in the same row order. By default every prompt is
+its own job, so each prompt gets its own `.f32`/`.json` pair. `--batch 32` packs 32 prompts into one job
+(one file pair for all 32, fewer tunnel round trips): worth it for files with hundreds of prompts.
 
 ### Single prompts
 
@@ -169,12 +214,14 @@ python3 laptop/kimodo_prompts.py "a person walks forward and waves" "someone jum
 ### A file (one prompt per line)
 
 ```bash
-python3 laptop/kimodo_prompts.py --file prompts.txt --batch 32 --wait
+python3 laptop/kimodo_prompts.py --file prompts.txt --wait             # one file pair per prompt
+python3 laptop/kimodo_prompts.py --file prompts.txt --batch 32 --wait  # large files: one pair per 32
 ```
 
 ### Continuously, while the session runs
 
-Type prompts, one per line; each line is sent as soon as you stop typing for 2 s (or a batch of 32 fills).
+Type prompts, one per line; each line is sent right away. (With `--batch N`, lines are collected until N
+fill or you stop typing for 2 s.)
 `Ctrl-D` ends and waits for the last results, `Ctrl-C` stops at once.
 
 ```bash
@@ -184,9 +231,19 @@ python3 laptop/kimodo_prompts.py --watch
 Feed it from another program or a growing file:
 
 ```bash
-tail -f prompts.txt | python3 laptop/kimodo_prompts.py --watch
+tail -n 0 -F prompts.txt | python3 laptop/kimodo_prompts.py --watch
 my_prompt_generator | python3 laptop/kimodo_prompts.py --watch --batch 16
 ```
+
+`--batch` is prompts per job, not a limit: `--watch` keeps reading until you stop it.
+For a growing file:
+- `-n 0` sends only lines added from now on. Plain `tail -f` first repeats the file's last 10 lines, and
+  they would be encoded again (there's no duplicate check), e.g. after a `--file prompts.txt` run.
+- `-F` keeps following when an editor saves by replacing the file; `-f` would miss those edits.
+  Appending from a terminal (`echo "a person waves." >> prompts.txt`) works either way.
+- `--file` reads the file once; use this instead to keep adding lines to the same file.
+- Results are downloaded as each job finishes. Stop with `Ctrl-C` (`Ctrl-D` does nothing with a pipe);
+  jobs still running are listed and can be collected later with `--fetch`.
 
 Or watch a folder: every `*.txt` dropped into it becomes a job and is moved to `inbox/sent/`:
 

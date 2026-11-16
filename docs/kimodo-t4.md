@@ -51,15 +51,16 @@ shutdown, troubleshooting) is in [kimodo-t4-setup.md](kimodo-t4-setup.md). The s
 4. Send prompts, at any time and as often as you like:
    ```bash
    python3 laptop/kimodo_prompts.py "a person walks forward and waves" --wait     # one-off
-   python3 laptop/kimodo_prompts.py --file prompts.txt --batch 32 --wait         # a file
-   tail -f prompts.txt | python3 laptop/kimodo_prompts.py --watch                # every new line
+   python3 laptop/kimodo_prompts.py --file prompts.txt --wait                    # a file
+   tail -n 0 -F prompts.txt | python3 laptop/kimodo_prompts.py --watch          # every new line
    python3 laptop/kimodo_prompts.py --watch-dir inbox/                           # every *.txt dropped in
    ```
-   Results: `data/kimodo_embeddings/<job>.f32` and `<job>.json` (prompts in row order).
+   Results: `data/kimodo_embeddings/<job>.f32` and `<job>.json` (prompts in row order), one pair per prompt.
    `np.fromfile(f, "<f4").reshape(-1, 4096)`.
 
-Batch prompts (`--batch`, default 32): each job costs a few tunnel round trips, which take longer than the
-~50 ms of GPU work per prompt. `--watch` flushes a partial batch after 2 s of quiet.
+One prompt per job by default (`--batch 1`), so every prompt arrives on its own as soon as it's encoded. Each
+job costs a few tunnel round trips, which take longer than the ~50 ms of GPU work per prompt, so for large
+files `--batch 32` is faster overall. With `--batch N`, `--watch` flushes a partial batch after 2 s of quiet.
 
 ## Making later sessions start faster
 
