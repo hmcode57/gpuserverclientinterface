@@ -200,7 +200,7 @@ You can submit prompts (Part 5) before the workers are ready; they wait in the q
 
 ## Part 5: use it
 
-All results go to `data/kimodo_embeddings/` (change with `--out DIR`), downloaded as soon as each job is done:
+All results go to `prompts-for-encoder-files/out/` (change with `--out DIR`), downloaded as soon as each job is done:
 `<job>.f32` holds the embeddings, `<job>.json` the prompts in the same row order. By default every prompt is
 its own job, so each prompt gets its own `.f32`/`.json` pair. `--batch 32` packs 32 prompts into one job
 (one file pair for all 32, fewer tunnel round trips): worth it for files with hundreds of prompts.
@@ -265,8 +265,8 @@ python3 laptop/kimodo_prompts.py --fetch <job id> <job id>   # downloads them wh
 
 ```python
 import json, numpy as np
-emb = np.fromfile("data/kimodo_embeddings/<job>.f32", "<f4").reshape(-1, 4096)
-prompts = json.load(open("data/kimodo_embeddings/<job>.json"))["prompts"]   # prompts[i] -> emb[i]
+emb = np.fromfile("prompts-for-encoder-files/out/<job>.f32", "<f4").reshape(-1, 4096)
+prompts = json.load(open("prompts-for-encoder-files/out/<job>.json"))["prompts"]   # prompts[i] -> emb[i]
 ```
 
 Each row is the embedding `kimodo_generate_embedding` takes (and `kmd-sample-embedding` with a raw `.f32`).

@@ -144,7 +144,7 @@ def main():
     ap.add_argument("--batch", type=int, default=1,
                     help="prompts per job (default 1: one result file pair per prompt)")
     ap.add_argument("--priority", type=int, default=0)
-    ap.add_argument("--out", default=os.path.join(ROOT, "data/kimodo_embeddings"))
+    ap.add_argument("--out", default=os.path.join(ROOT, "prompts-for-encoder-files/out"))
     ap.add_argument("--wait", action="store_true", help="wait for the jobs and download their embeddings")
     ap.add_argument("--watch", action="store_true", help="read prompts from stdin continuously")
     ap.add_argument("--flush", type=float, default=2.0, help="--watch: submit a partial batch after this many s")

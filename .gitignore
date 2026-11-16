@@ -18,3 +18,6 @@ session_out/
 .vscode/
 .DS_Store
 .directory
+
+# kimodo embeddings downloaded by laptop/kimodo_prompts.py
+prompts-for-encoder-files/out/
