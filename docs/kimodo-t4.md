@@ -52,7 +52,7 @@ shutdown, troubleshooting) is in [kimodo-t4-setup.md](kimodo-t4-setup.md). The s
    ```bash
    python3 laptop/kimodo_prompts.py "a person walks forward and waves" --wait     # one-off
    python3 laptop/kimodo_prompts.py --file prompts.txt --wait                    # a file
-   tail -n 0 -F prompts.txt | python3 laptop/kimodo_prompts.py --watch          # every new line
+   python3 laptop/kimodo_prompts.py --follow prompts.txt                       # every new line, one labelled file each
    python3 laptop/kimodo_prompts.py --watch-dir inbox/                           # every *.txt dropped in
    ```
    Results: `prompts-for-encoder-files/out/<job>.f32` and `<job>.json` (prompts in row order), one pair per prompt.

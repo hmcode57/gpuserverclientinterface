@@ -279,32 +279,45 @@ python3 laptop/kimodo_prompts.py --file prompts.txt --wait             # one fil
 python3 laptop/kimodo_prompts.py --file prompts.txt --batch 32 --wait  # large files: one pair per 32
 ```
 
-### Continuously, while the session runs
+### One file you keep adding to (recommended)
+
+```bash
+python3 laptop/kimodo_prompts.py --follow prompts-for-encoder-files/prompts.txt
+```
+
+Add lines to the file however you like (editor, `echo "a person waves." >> ...`, another program). About a
+second after each save, every line that wasn't sent before goes out as its own job, and each result is saved
+as its own labelled pair, numbered in sending order:
+
+```text
+prompts-for-encoder-files/out/0001-a-person-jumps-over-a-small-obstacle.f32   # 4096 float32
+prompts-for-encoder-files/out/0001-a-person-jumps-over-a-small-obstacle.json  # {"prompt": ..., "n": 1, "job": ...}
+```
+
+- Only new lines: the lines already in the file when you first start are skipped (`--include-existing`
+  sends them too).
+- It remembers what was sent in `out/.follow-<file>.json`: saving from an editor, deleting or moving lines,
+  and stopping and restarting never send a prompt twice. Lines added while it was stopped are sent on the next
+  start, and results still running are collected then.
+- A prompt text is sent once. To send one again, change the line. A failed prompt (e.g. too long) is shown
+  as `[failed]`; edit it and save to send the fixed version.
+- `--batch 32` packs new lines into fewer jobs (faster for big pastes); the files are still one per prompt.
+- Stop with `Ctrl-C`.
+
+### Typed or piped in
 
 Type prompts, one per line; each line is sent right away. (With `--batch N`, lines are collected until N
-fill or you stop typing for 2 s.)
-`Ctrl-D` ends and waits for the last results, `Ctrl-C` stops at once.
+fill or you stop typing for 2 s.) `Ctrl-D` ends and waits for the last results, `Ctrl-C` stops at once.
 
 ```bash
 python3 laptop/kimodo_prompts.py --watch
-```
-
-Feed it from another program or a growing file:
-
-```bash
-tail -n 0 -F prompts.txt | python3 laptop/kimodo_prompts.py --watch
 my_prompt_generator | python3 laptop/kimodo_prompts.py --watch --batch 16
 ```
 
-`--batch` is prompts per job, not a limit: `--watch` keeps reading until you stop it.
-For a growing file:
-- `-n 0` sends only lines added from now on. Plain `tail -f` first repeats the file's last 10 lines, and
-  they would be encoded again (there's no duplicate check), e.g. after a `--file prompts.txt` run.
-- `-F` keeps following when an editor saves by replacing the file; `-f` would miss those edits.
-  Appending from a terminal (`echo "a person waves." >> prompts.txt`) works either way.
-- `--file` reads the file once; use this instead to keep adding lines to the same file.
-- Results are downloaded as each job finishes. Stop with `Ctrl-C` (`Ctrl-D` does nothing with a pipe);
-  jobs still running are listed and can be collected later with `--fetch`.
+`--batch` is prompts per job, not a limit: `--watch` keeps reading until you stop it. Results go to
+`out/<job>.f32` / `.json` as each job finishes; jobs still running at `Ctrl-C` are listed and can be collected
+later with `--fetch`. For a file, use `--follow` above rather than `tail -F file | ... --watch`: when an editor
+saves by replacing the file, `tail -F` sends the whole file again.
 
 Or watch a folder: every `*.txt` dropped into it becomes a job and is moved to `inbox/sent/`:
 
