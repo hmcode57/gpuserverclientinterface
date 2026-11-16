@@ -1,0 +1,238 @@
+From f853bcc1d9c64f400493f46df1c94c480533a2ca Mon Sep 17 00:00:00 2001
+From: matze <hartmannmathias57@gmail.com>
+Date: Mon, 16 Nov 2026 13:22:51 +0200
+Subject: [PATCH] Add optional GGML CUDA backend and persistent
+ kmd-encode-serve
+
+KIMODO_ENABLE_CUDA=ON builds ggml-cuda; at runtime CUDA is tried before
+Vulkan (KIMODO_BACKEND=cuda|vulkan|cpu picks one). kmd-encode-serve keeps the
+text encoder loaded and answers length-prefixed prompts on stdin/stdout.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ CMakeLists.txt           | 13 +++++++++
+ src/encode_serve.cpp     | 57 ++++++++++++++++++++++++++++++++++++++++
+ src/ggml_weights.cpp     | 14 ++++++++--
+ src/llm_text_encoder.cpp | 22 ++++++++++++++--
+ src/llm_text_encoder.hpp |  2 ++
+ 5 files changed, 104 insertions(+), 4 deletions(-)
+ create mode 100644 src/encode_serve.cpp
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 9f66280..6e152b1 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -5,6 +5,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
+ set(CMAKE_CXX_EXTENSIONS OFF)
+ option(KIMODO_BUILD_TESTS "Build Kimodo tests" ON)
+ option(KIMODO_ENABLE_VULKAN "Enable GGML Vulkan backend when GGML is available" ON)
++option(KIMODO_ENABLE_CUDA "Enable GGML CUDA backend when GGML is available" OFF)
+ option(KIMODO_ENABLE_FUZZERS "Build libFuzzer parser targets" OFF)
+ set(KIMODO_GGML_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/ggml" CACHE PATH "Pinned GGML submodule source directory")
+ set(KIMODO_ROOT_PARITY_MODEL "${CMAKE_CURRENT_SOURCE_DIR}/models/kimodo-smplx-rp-v1-f32.gguf" CACHE FILEPATH "F32 motion GGUF required by parity tests")
+@@ -31,6 +32,7 @@ if(EXISTS "${KIMODO_GGML_SOURCE_DIR}/CMakeLists.txt")
+   set(GGML_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+   set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
+   set(GGML_VULKAN ${KIMODO_ENABLE_VULKAN} CACHE BOOL "" FORCE)
++  set(GGML_CUDA ${KIMODO_ENABLE_CUDA} CACHE BOOL "" FORCE)
+   set(GGML_BACKEND_DL OFF CACHE BOOL "" FORCE)
+   set(BUILD_SHARED_LIBS ON CACHE BOOL "" FORCE)
+   add_subdirectory("${KIMODO_GGML_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/ggml" EXCLUDE_FROM_ALL)
+@@ -41,6 +43,12 @@ if(EXISTS "${KIMODO_GGML_SOURCE_DIR}/CMakeLists.txt")
+     set(KIMODO_VK_LIBS ggml-vulkan)
+     set(KIMODO_VK_DEFS KIMODO_HAVE_GGML_VULKAN=1)
+   endif()
++  # CUDA rides on the same per-target backend lists as Vulkan. When both are
++  # built, CUDA is tried first; KIMODO_BACKEND=vulkan or cpu overrides it.
++  if(KIMODO_ENABLE_CUDA AND TARGET ggml-cuda)
++    list(APPEND KIMODO_VK_LIBS ggml-cuda)
++    list(APPEND KIMODO_VK_DEFS KIMODO_HAVE_GGML_CUDA=1)
++  endif()
+   target_link_libraries(kimodo PRIVATE ggml ${KIMODO_VK_LIBS})
+   target_compile_definitions(kimodo PRIVATE KIMODO_HAVE_GGML=1 ${KIMODO_VK_DEFS})
+   target_link_libraries(kmd-inspect PRIVATE ggml)
+@@ -68,6 +76,11 @@ if(EXISTS "${KIMODO_GGML_SOURCE_DIR}/CMakeLists.txt")
+   target_include_directories(kmd-encode PRIVATE src)
+   target_link_libraries(kmd-encode PRIVATE ggml ${KIMODO_VK_LIBS})
+   target_compile_definitions(kmd-encode PRIVATE KIMODO_HAVE_GGML=1 ${KIMODO_VK_DEFS})
++  add_executable(kmd-encode-serve src/encode_serve.cpp)
++  target_sources(kmd-encode-serve PRIVATE src/llm_text_encoder.cpp src/llm_tokenizer.cpp)
++  target_include_directories(kmd-encode-serve PRIVATE src)
++  target_link_libraries(kmd-encode-serve PRIVATE ggml ${KIMODO_VK_LIBS})
++  target_compile_definitions(kmd-encode-serve PRIVATE KIMODO_HAVE_GGML=1 ${KIMODO_VK_DEFS})
+   add_executable(kmd-quantize-text src/quantize_text.cpp)
+   target_link_libraries(kmd-quantize-text PRIVATE ggml)
+   add_executable(kmd-pack-text src/pack_text.cpp)
+diff --git a/src/encode_serve.cpp b/src/encode_serve.cpp
+new file mode 100644
+index 0000000..c42d2e7
+--- /dev/null
++++ b/src/encode_serve.cpp
+@@ -0,0 +1,57 @@
++// Persistent text-encoder process for job queues: load the LLM2Vec encoder
++// once, then answer prompts over stdin/stdout until EOF.
++//
++// Protocol (little-endian):
++//   request:  u32 n, then n bytes of UTF-8 prompt   (n == 0 or EOF: exit)
++//   response: u32 0, then 4096 f32                  (success)
++//             u32 1, u32 m, then m bytes of message  (failure; process continues)
++// After loading, one line "ready backend=<name>" is written to stderr.
++#include "llm_text_encoder.hpp"
++
++#include <array>
++#include <cstdint>
++#include <cstdio>
++#include <iostream>
++#include <string>
++
++namespace {
++bool read_exact(void *data, size_t n) { return std::fread(data, 1, n, stdin) == n; }
++void write_u32(uint32_t value) { std::fwrite(&value, sizeof(value), 1, stdout); }
++} // namespace
++
++int main(int argc, char **argv) try {
++    if (argc != 2) {
++        std::cerr << "usage: " << argv[0] << " TEXT_MODEL.gguf|TEXT_BUNDLE_DIR\n";
++        return 2;
++    }
++    auto encoder = kimodo::detail::llm_text_encoder::load(argv[1]);
++    if (!encoder) {
++        std::cerr << "load failed: " << encoder.error() << '\n';
++        return 1;
++    }
++    std::cerr << "ready backend=" << (*encoder)->backend_name() << std::endl;
++    std::string prompt;
++    for (;;) {
++        uint32_t n = 0;
++        if (!read_exact(&n, sizeof(n)) || n == 0) return 0;
++        if (n > (1U << 20)) {
++            std::cerr << "request too large: " << n << '\n';
++            return 1;
++        }
++        prompt.resize(n);
++        if (!read_exact(prompt.data(), n)) return 1;
++        auto embedding = (*encoder)->encode(prompt);
++        if (embedding) {
++            write_u32(0);
++            std::fwrite(embedding->data(), sizeof(float), embedding->size(), stdout);
++        } else {
++            write_u32(1);
++            write_u32(static_cast<uint32_t>(embedding.error().size()));
++            std::fwrite(embedding.error().data(), 1, embedding.error().size(), stdout);
++        }
++        std::fflush(stdout);
++    }
++} catch (const std::exception &error) {
++    std::cerr << error.what() << '\n';
++    return 1;
++}
+diff --git a/src/ggml_weights.cpp b/src/ggml_weights.cpp
+index 1b5594d..9e05ddd 100644
+--- a/src/ggml_weights.cpp
++++ b/src/ggml_weights.cpp
+@@ -20,6 +20,9 @@
+ #if defined(KIMODO_HAVE_GGML_VULKAN)
+ #include <ggml-vulkan.h>
+ #endif
++#if defined(KIMODO_HAVE_GGML_CUDA)
++#include <ggml-cuda.h>
++#endif
+ 
+ namespace kimodo::detail {
+ namespace {
+@@ -73,15 +76,22 @@ std::expected<std::unique_ptr<ggml_motion_weights>, std::string> ggml_motion_wei
+     if (!result->gguf_ || !result->context_) return std::unexpected("GGML could not load checked motion GGUF");
+     // Vulkan is the normal inference path.  Keep the CPU backend as a
+     // portability fallback, including for CI systems without a Vulkan ICD.
++#if defined(KIMODO_HAVE_GGML_CUDA)
++    {
++        const char *value = std::getenv("KIMODO_BACKEND");
++        if ((!value || std::string_view(value) == "cuda") && ggml_backend_cuda_get_device_count() > 0)
++            result->backend_ = ggml_backend_cuda_init(0);
++    }
++#endif
+ #if defined(KIMODO_HAVE_GGML_VULKAN)
+     // Retain a deterministic CPU escape hatch for parity triage.  It is not
+     // a performance mode; a captured fixture can establish whether a drift
+     // belongs to the GGML graph or specifically to Vulkan.
+     const bool force_cpu = [] {
+         const char *value = std::getenv("KIMODO_BACKEND");
+-        return value && std::string_view(value) == "cpu";
++        return value && (std::string_view(value) == "cpu" || std::string_view(value) == "cuda");
+     }();
+-    if (!force_cpu) {
++    if (!result->backend_ && !force_cpu) {
+         configure_vulkan_f32_parity();
+         if (ggml_backend_vk_get_device_count() > 0) result->backend_ = ggml_backend_vk_init(0);
+     }
+diff --git a/src/llm_text_encoder.cpp b/src/llm_text_encoder.cpp
+index 05096a1..8085619 100644
+--- a/src/llm_text_encoder.cpp
++++ b/src/llm_text_encoder.cpp
+@@ -10,6 +10,9 @@
+ #include <ggml-backend.h>
+ #include <ggml-cpu.h>
+ #include <ggml-vulkan.h>
++#if defined(KIMODO_HAVE_GGML_CUDA)
++#include <ggml-cuda.h>
++#endif
+ #include <gguf.h>
+ 
+ #include <algorithm>
+@@ -39,7 +42,14 @@ constexpr int64_t hidden = 4096, heads = 32, kv_heads = 8, head_dim = 128;
+ 
+ bool use_vulkan() {
+     const char *choice = std::getenv("KIMODO_BACKEND");
+-    return !choice || std::string_view(choice) != "cpu";
++    return !choice || (std::string_view(choice) != "cpu" && std::string_view(choice) != "cuda");
++}
++
++// KIMODO_BACKEND: unset = first available GPU backend (CUDA, then Vulkan),
++// "cuda" / "vulkan" = only that one, "cpu" = CPU.
++[[maybe_unused]] bool use_cuda() {
++    const char *choice = std::getenv("KIMODO_BACKEND");
++    return !choice || std::string_view(choice) == "cuda";
+ }
+ 
+ int layer_chunk_size() {
+@@ -465,8 +475,12 @@ std::expected<std::unique_ptr<llm_text_encoder>, std::string> llm_text_encoder::
+     }
+     auto result = std::unique_ptr<llm_text_encoder>(new llm_text_encoder);
+     result->impl_ = std::make_unique<impl>();
++#if defined(KIMODO_HAVE_GGML_CUDA)
++    if (use_cuda() && ggml_backend_cuda_get_device_count() > 0) result->impl_->backend = ggml_backend_cuda_init(0);
++#endif
+ #if defined(KIMODO_HAVE_GGML_VULKAN)
+-    if (use_vulkan() && ggml_backend_vk_get_device_count()) result->impl_->backend = ggml_backend_vk_init(0);
++    if (!result->impl_->backend && use_vulkan() && ggml_backend_vk_get_device_count())
++        result->impl_->backend = ggml_backend_vk_init(0);
+ #endif
+     if (!result->impl_->backend) {
+         result->impl_->backend = ggml_backend_cpu_init();
+@@ -504,6 +518,10 @@ std::expected<std::unique_ptr<llm_text_encoder>, std::string> llm_text_encoder::
+     return result;
+ } catch (const std::exception &error) { return std::unexpected(error.what()); }
+ 
++std::string llm_text_encoder::backend_name() const {
++    return impl_ && impl_->backend ? ggml_backend_name(impl_->backend) : "none";
++}
++
+ std::expected<std::array<float, 4096>, std::string> llm_text_encoder::encode(std::string_view prompt) const try {
+     const std::scoped_lock lock(impl_->encode_mutex);
+     const auto encode_started = std::chrono::steady_clock::now();
+diff --git a/src/llm_text_encoder.hpp b/src/llm_text_encoder.hpp
+index 7867331..9e20e1f 100644
+--- a/src/llm_text_encoder.hpp
++++ b/src/llm_text_encoder.hpp
+@@ -17,6 +17,8 @@ public:
+     // impose a VRAM-safe cap.
+     static std::expected<std::unique_ptr<llm_text_encoder>, std::string> load(std::string_view source);
+     std::expected<std::array<float, 4096>, std::string> encode(std::string_view utf8_prompt) const;
++    // GGML backend name, e.g. "CUDA0", "Vulkan0" or "CPU".
++    std::string backend_name() const;
+     ~llm_text_encoder();
+     llm_text_encoder(const llm_text_encoder &) = delete;
+     llm_text_encoder &operator=(const llm_text_encoder &) = delete;
+-- 
+2.56.0
+

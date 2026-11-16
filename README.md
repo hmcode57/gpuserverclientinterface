@@ -30,6 +30,9 @@ It works in two ways:
   torchrun, and sessions sync every few hundred steps through Cloudflare R2, so weights never touch your home
   connection ([docs/diloco.md](docs/diloco.md)).
 
+Worked example on this branch: the kimodo text encoder (Q8_0) resident on each T4 of a Kaggle T4 x2
+session, fed with prompts you submit while it runs ([docs/kimodo-t4.md](docs/kimodo-t4.md)).
+
 ## What this framework is useful for
 
 It pays off when **the GPU is temporary and unreliable, the work splits into independent jobs that take
