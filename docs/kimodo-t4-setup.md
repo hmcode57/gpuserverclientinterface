@@ -22,7 +22,7 @@ git checkout kimodo-t4
 | `cloudflared` | `cloudflared --version` | the tunnel the notebook connects through |
 | `openssl`, `curl` | `openssl version; curl --version` | `start.sh` |
 | `numpy` (optional) | `python3 -c "import numpy"` | reading the embeddings |
-| Kaggle CLI ≥ 1.8 (optional) | `kaggle --version` | Part 3B, starting runs from the terminal |
+| Kaggle CLI ≥ 1.8 (optional) | `kaggle --version` | Part 3B (starting runs from the terminal), 1.4 (datasets) |
 
 ### 1.2 Kaggle account
 
@@ -49,13 +49,43 @@ Never paste the token into the notebook cell itself.
 
 ### 1.4 Optional: make later sessions start in seconds instead of ~10 minutes
 
-After your first successful session:
+Two private datasets: the weights (skips the 8 GB download) and the CUDA build (skips the ~10 min build).
+`setup.sh` finds both under `/kaggle/input`. `tools/notebook/kimodo_datasets.py` creates them; it reads your
+Kaggle username from the Kaggle CLI (3B.1), so the commands are the same for everyone.
 
-1. In the notebook's *Output*, download `kimodo/kimodo-cuda-bin.tar.gz` (the CUDA build, a few MB).
-2. Create a private Kaggle dataset from it (e.g. `kimodo-cuda-bin`), and another private dataset with
-   `Llama-3-Kimodo-Q8_0.gguf` + `tokenizer.gguf` (e.g. `kimodo-q8`; upload from `~/kimodo/` takes a while once).
-3. Attach both datasets to the notebook (*Add Input*). `setup.sh` finds them under `/kaggle/input` and skips
-   the build and the 8 GB download.
+**Weights, any time** (8 GB upload, once):
+
+```bash
+python3 tools/notebook/kimodo_datasets.py weights              # uses ~/kimodo/*.gguf, checks the sha256
+python3 tools/notebook/kimodo_datasets.py weights --download   # no local copy: fetch from Hugging Face first
+python3 tools/notebook/kimodo_datasets.py weights --dir /path  # the .gguf files are somewhere else
+```
+
+**CUDA build, after the first session whose `kimodo` phase ended `ok=True`:**
+
+```bash
+python3 tools/notebook/kimodo_datasets.py bin
+```
+
+It takes `kimodo-cuda-bin.tar.gz` from the latest run of `<your user>/kimodo-t4` (`--kernel` for another
+notebook).
+After changing `KIMODO_COMMIT` or the build flags in `setup.sh`, run one session without this dataset and then
+`bin` again, or the old binary keeps being used.
+
+Check what exists and get the flags to add:
+
+```bash
+python3 tools/notebook/kimodo_datasets.py status
+```
+
+**Attach them:**
+- Terminal runs (3B): add `--dataset $KUSER/kimodo-q8 --dataset $KUSER/kimodo-cuda-bin` to the
+  `kaggle_run.py --mode run` command. Every push replaces the notebook's inputs, so inputs added in the web
+  editor don't carry over to terminal runs.
+- Web notebook (3A): *Add Input* → your datasets → add both.
+
+The `kimodo` log (`data/reports/kaggleA/kimodo_gpu0.log`) then shows `binary from /kaggle/input/...`, and
+`/kaggle/working/kimodo/weights.log` shows `weights from dataset ...`, instead of a build and a download.
 
 ---
 
@@ -84,7 +114,10 @@ python3 laptop/submit.py --list   # empty list, no error = queue is up
 python3 laptop/make_bundle.py
 ```
 
-The notebook downloads this bundle from the queue at start. Rebuild it whenever you change code on the branch.
+The notebook downloads this bundle from the queue at start. It stays in `data/bundle.tar.gz` and is reused,
+so rebuild it only after code under `worker/` or `tools/notebook/` changed (e.g. after a `git pull`).
+Changes to `laptop/` and docs run on the laptop and don't need a rebuild. The notebook log prints the
+bundle's commit (`BUNDLE.json`) at the start.
 
 ---
 
@@ -133,11 +166,10 @@ Otherwise: kaggle.com → Settings → *API* → create a token, save it as `~/.
 chmod 600 ~/.kaggle/access_token
 ```
 
-Then set your Kaggle username for the commands below (the `username:` from `kaggle config view`). Do this in
-every new terminal:
+Then set your Kaggle username for the commands below. Do this in every new terminal:
 
 ```bash
-KUSER=your-kaggle-username
+KUSER=$(kaggle config view | awk '/username:/ {print $3}'); echo "$KUSER"
 ```
 
 ### 3B.2 Check the connection (CPU, takes about a minute)
@@ -165,8 +197,19 @@ python3 tools/notebook/kaggle_run.py --kernel $KUSER/kimodo-t4 --mode run \
     --session-args '--session kaggleA --phases preflight,kimodo,workers --cmd "kimodo=bash worker/kimodo/setup.sh" --worker-args "--handler kimodo=handlers.kimodo_encode:KimodoEncode" --budget-minutes 540'
 ```
 
+With the datasets from 1.4, add their flags after `--token-dataset ...` (`kimodo_datasets.py status` prints
+them): `--dataset $KUSER/kimodo-q8 --dataset $KUSER/kimodo-cuda-bin`.
+
 It pushes the notebook (T4 x2, `QUEUE_URL` filled in from `run/url`), starts it and follows its log.
-`Ctrl-C` only stops following; the session keeps running. Later:
+Every push is a new version of the notebook, so after a code change rebuild the bundle (2.2) first.
+
+- `QUEUED`: Kaggle is waiting for a free T4 x2 machine; GPU hours don't count yet. Usually seconds to
+  minutes, longer at busy times. Don't push again (that puts you at the back) and don't open the notebook in
+  the Kaggle editor with the GPU on: an interactive GPU session takes one of your GPU slots.
+- `RUNNING`: the log shows `==== phase preflight`, `==== phase kimodo` (the long one), `==== phase workers`.
+  Kaggle's log can lag a minute or two; Part 4 is the quickest check.
+
+`Ctrl-C` only stops following; the session keeps running. Show status and log again later:
 
 ```bash
 python3 tools/notebook/kaggle_run.py --kernel $KUSER/kimodo-t4 --logs
@@ -192,7 +235,8 @@ kaggleA-gpu1   ready  family=kimodo job=-  seen 2s ago  {"backend": "CUDA0", ...
 | Session | Until ready |
 |---|---|
 | First (build + 8 GB download) | about 10–15 min |
-| With the datasets from 1.4 | about 1–2 min |
+| Weights dataset only (build still runs) | about 10 min |
+| Both datasets from 1.4 | about 1–2 min |
 
 You can submit prompts (Part 5) before the workers are ready; they wait in the queue.
 
@@ -257,7 +301,7 @@ printf 'a person kicks\na person sits down\n' > inbox/batch-001.txt
 ### Submit now, collect later
 
 ```bash
-python3 laptop/kimodo_prompts.py --file prompts.txt          # prints [queued] <job id> per batch
+python3 laptop/kimodo_prompts.py --file prompts.txt          # prints [queued] <job id> per job
 python3 laptop/kimodo_prompts.py --fetch <job id> <job id>   # downloads them when done
 ```
 
@@ -307,9 +351,13 @@ are picked up by the next session.
 | Notebook: `HTTP Error 530` / connection errors | `start.sh` was restarted, address changed | rerun the notebook with the new `run/url` |
 | Phase `kimodo` fails, `nvcc not found` | Kaggle image without CUDA toolkit | check the accelerator is a GPU; report the image version |
 | Phase `kimodo` fails: `Target "ggml-cuda" links to: CUDA::cuda_driver but the target was not found` | old bundle without `GGML_CUDA_NO_VMM=ON` | `python3 laptop/make_bundle.py`, start a new session |
-| Phase `kimodo` fails during cmake/build | compiler or CUDA version on the current image | read `/kaggle/working/kimodo/cmake.log` / `build.log` (also in the notebook output) |
+| Phase `kimodo` fails during cmake/build | compiler or CUDA version on the current image | on the laptop: `data/reports/kaggleA/kimodo_gpu0.log` / `kimodo_gpu1.log` (end of `cmake.log` / `build.log`); full logs in the notebook output under `kimodo/` |
+| `phase kimodo: ok=False`, then workers crash with `kimodo not set up: no .../ready.json` | the build failed; workers have nothing to load and give up after 6 crashes | fix the `kimodo` error above; the worker crashes are only a follow-on |
 | Worker error `came up on CPU, not CUDA` | the build has no CUDA, or no GPU visible | check `nvidia-smi` in the notebook and the build log |
 | Worker error `out of memory` | something else holds VRAM on that GPU | the encoder needs about 9 GB; don't run other GPU work in the notebook |
 | Job `failed`: `prompt N (...): prompt token count must be in 1..511` | prompt too long | shorten that prompt and resubmit |
 | Prompts stay `queued` | no worker ready yet, or the session ended | `submit.py --workers`; start a new session (Part 2–3) |
 | `kimodo_prompts.py` connection refused | queue not running on the laptop | `./laptop/start.sh` |
+| `bash: kaggle-user: No such file or directory` | a `<kaggle-user>` placeholder from an old copy of a command | use `$KUSER` (3B.1) or your username |
+| Run stays `QUEUED` for a long time | no free T4 x2, an open interactive GPU session, or GPU quota used up | close the notebook editor; check Settings → *Quotas*; wait or try later |
+| Log shows old times / an earlier run | `--logs` shows the latest run; the new one wasn't pushed | check `kaggle kernels status $KUSER/kimodo-t4`, push again with 3B.3 |
