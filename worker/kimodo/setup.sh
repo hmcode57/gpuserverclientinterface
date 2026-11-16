@@ -85,11 +85,15 @@ EOF
     git -C "$SRC" checkout -q "$KIMODO_COMMIT"
     git -C "$SRC" submodule update -q --init --recursive
   fi
+  # GGML_CUDA_NO_VMM: ggml's VMM pool links libcuda.so directly (CUDA::cuda_driver), which CMake doesn't find on
+  # the CUDA 13 Kaggle image ("target was not found"). The legacy pool only holds per-prompt scratch buffers; the
+  # ~9 GB resident encoder is unaffected.
   log "building with $CXX_BIN, nvcc $(nvcc --version | grep -o 'release [0-9.]*'), sm_$CUDA_ARCH"
   cmake -S "$SRC" -B "$SRC/build" -G Ninja -DCMAKE_BUILD_TYPE=Release -DKIMODO_BUILD_TESTS=OFF \
     -DKIMODO_ENABLE_VULKAN=OFF -DKIMODO_ENABLE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES="$CUDA_ARCH" \
     -DCMAKE_C_COMPILER="$CC_BIN" -DCMAKE_CXX_COMPILER="$CXX_BIN" -DCMAKE_CUDA_HOST_COMPILER="$CXX_BIN" \
-    -DCMAKE_CUDA_FLAGS="-allow-unsupported-compiler" > "$KIMODO_HOME/cmake.log" 2>&1 \
+    -DCMAKE_CUDA_FLAGS="-allow-unsupported-compiler" \
+    -DGGML_CUDA_NO_VMM=ON > "$KIMODO_HOME/cmake.log" 2>&1 \
     || { tail -40 "$KIMODO_HOME/cmake.log"; exit 1; }
   cmake --build "$SRC/build" --target kmd-encode-serve -j"$(nproc)" > "$KIMODO_HOME/build.log" 2>&1 \
     || { tail -60 "$KIMODO_HOME/build.log"; exit 1; }

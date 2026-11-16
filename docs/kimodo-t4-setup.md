@@ -306,6 +306,7 @@ are picked up by the next session.
 | Notebook: `QUEUE_TOKEN was not available` | secret not attached to *this* notebook, or API-pushed run | attach the secret (1.3), or use `--token-dataset` (3B) |
 | Notebook: `HTTP Error 530` / connection errors | `start.sh` was restarted, address changed | rerun the notebook with the new `run/url` |
 | Phase `kimodo` fails, `nvcc not found` | Kaggle image without CUDA toolkit | check the accelerator is a GPU; report the image version |
+| Phase `kimodo` fails: `Target "ggml-cuda" links to: CUDA::cuda_driver but the target was not found` | old bundle without `GGML_CUDA_NO_VMM=ON` | `python3 laptop/make_bundle.py`, start a new session |
 | Phase `kimodo` fails during cmake/build | compiler or CUDA version on the current image | read `/kaggle/working/kimodo/cmake.log` / `build.log` (also in the notebook output) |
 | Worker error `came up on CPU, not CUDA` | the build has no CUDA, or no GPU visible | check `nvidia-smi` in the notebook and the build log |
 | Worker error `out of memory` | something else holds VRAM on that GPU | the encoder needs about 9 GB; don't run other GPU work in the notebook |
