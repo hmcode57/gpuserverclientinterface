@@ -12,14 +12,13 @@ set -euo pipefail
 
 if [ -d /kaggle/working ]; then KIMODO_HOME=${KIMODO_HOME:-/kaggle/working/kimodo}; else KIMODO_HOME=${KIMODO_HOME:-$PWD/kimodo}; fi
 WEIGHTS_DIR=${KIMODO_WEIGHTS_DIR:-/tmp/kimodo-weights}   # /tmp: larger than /kaggle/working, not saved
-KIMODO_REPO=${KIMODO_REPO:-https://github.com/localai-org/kimodo.cpp.git}
-KIMODO_COMMIT=${KIMODO_COMMIT:-75ed52d}                  # the commit kimodo-cuda.patch was made against
+KIMODO_REPO=${KIMODO_REPO:-https://github.com/hmcode57/kimodo.cpp.git}   # fork of localai-org/kimodo.cpp
+KIMODO_COMMIT=${KIMODO_COMMIT:-f853bcc}                  # branch kaggle-cuda: CUDA backend + kmd-encode-serve
 CUDA_ARCH=${KIMODO_CUDA_ARCH:-75}                        # T4
 HF=https://huggingface.co/LocalAI-io/Llama-3-Kimodo-GGML/resolve/main
 Q8=Llama-3-Kimodo-Q8_0.gguf
 Q8_SHA=b26d0e74b115b33a7f2df5aca04426548365e99217cd590986f8abc4172e4c5c
 TOK_SHA=81614aca62a98846c02b72cc2e5378e5bdce8b4d507b88f96eb1faa90dae607e
-HERE=$(cd "$(dirname "$0")" && pwd)
 
 mkdir -p "$KIMODO_HOME" "$WEIGHTS_DIR"
 exec 9>"$KIMODO_HOME/.setup.lock"
@@ -85,7 +84,6 @@ EOF
     git clone -q "$KIMODO_REPO" "$SRC"
     git -C "$SRC" checkout -q "$KIMODO_COMMIT"
     git -C "$SRC" submodule update -q --init --recursive
-    git -C "$SRC" apply "$HERE/kimodo-cuda.patch"
   fi
   log "building with $CXX_BIN, nvcc $(nvcc --version | grep -o 'release [0-9.]*'), sm_$CUDA_ARCH"
   cmake -S "$SRC" -B "$SRC/build" -G Ninja -DCMAKE_BUILD_TYPE=Release -DKIMODO_BUILD_TESTS=OFF \
