@@ -383,6 +383,7 @@ are picked up by the next session.
 | Phase `kimodo` fails: `Target "ggml-cuda" links to: CUDA::cuda_driver but the target was not found` | old bundle without `GGML_CUDA_NO_VMM=ON` | `python3 laptop/make_bundle.py`, start a new session |
 | Phase `kimodo` fails during cmake/build | compiler or CUDA version on the current image | on the laptop: `data/reports/kaggleA/kimodo_gpu0.log` / `kimodo_gpu1.log` (end of `cmake.log` / `build.log`); full logs in the notebook output under `kimodo/` |
 | `phase kimodo: ok=False`, then workers crash with `kimodo not set up: no .../ready.json` | the build failed; workers have nothing to load and give up after 6 crashes | fix the `kimodo` error above; the worker crashes are only a follow-on |
+| Worker crash `binbcast.cu: GGML_ASSERT(src1->type == GGML_TYPE_F32 || src1->type == GGML_TYPE_F16)` on the first prompt | build of the fork before `e6f6a2d` (BF16 norm weights repeated on CUDA) | `python3 laptop/make_bundle.py`, start a new session without the old `kimodo-cuda-bin` dataset |
 | Worker error `came up on CPU, not CUDA` | the build has no CUDA, or no GPU visible | check `nvidia-smi` in the notebook and the build log |
 | Worker error `out of memory` | something else holds VRAM on that GPU | the encoder needs about 9 GB; don't run other GPU work in the notebook |
 | Job `failed`: `prompt N (...): prompt token count must be in 1..511` | prompt too long | shorten that prompt and resubmit |

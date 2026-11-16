@@ -13,7 +13,7 @@ set -euo pipefail
 if [ -d /kaggle/working ]; then KIMODO_HOME=${KIMODO_HOME:-/kaggle/working/kimodo}; else KIMODO_HOME=${KIMODO_HOME:-$PWD/kimodo}; fi
 WEIGHTS_DIR=${KIMODO_WEIGHTS_DIR:-/tmp/kimodo-weights}   # /tmp: larger than /kaggle/working, not saved
 KIMODO_REPO=${KIMODO_REPO:-https://github.com/hmcode57/kimodo.cpp.git}   # fork of localai-org/kimodo.cpp
-KIMODO_COMMIT=${KIMODO_COMMIT:-f853bcc}                  # branch kaggle-cuda: CUDA backend + kmd-encode-serve
+KIMODO_COMMIT=${KIMODO_COMMIT:-e6f6a2d}                  # branch kaggle-cuda: CUDA backend, kmd-encode-serve, BF16 norm fix
 CUDA_ARCH=${KIMODO_CUDA_ARCH:-75}                        # T4
 HF=https://huggingface.co/LocalAI-io/Llama-3-Kimodo-GGML/resolve/main
 Q8=Llama-3-Kimodo-Q8_0.gguf

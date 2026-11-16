@@ -20,7 +20,7 @@ kimodo_prompts.py --watch  ──► queue_server ◄──── worker gpu0 �
 | File | Role |
 |---|---|
 | [hmcode57/kimodo.cpp](https://github.com/hmcode57/kimodo.cpp/tree/kaggle-cuda) `kaggle-cuda` | Fork of kimodo.cpp (upstream has only Vulkan and CPU) with a GGML CUDA backend and `kmd-encode-serve`, a process that loads the encoder once and answers prompts over stdin/stdout. |
-| `worker/kimodo/setup.sh` | Session phase: clones the fork at `f853bcc`, builds for sm_75 with nvcc, downloads and verifies the Q8_0 weights in parallel with the build. Runs once per notebook even though custom phases start once per GPU (a file lock). |
+| `worker/kimodo/setup.sh` | Session phase: clones the fork at `e6f6a2d`, builds for sm_75 with nvcc, downloads and verifies the Q8_0 weights in parallel with the build. Runs once per notebook even though custom phases start once per GPU (a file lock). |
 | `worker/handlers/kimodo_encode.py` | Handler `kimodo`: prompts → `embeddings.f32` (`[n, 4096]` float32) + `result.json`. Refuses to run if the encoder came up on CPU instead of CUDA. |
 | `laptop/kimodo_prompts.py` | Submits prompts (arguments, a file, stdin continuously, or a watched folder) and downloads the embeddings into `prompts-for-encoder-files/out/`. |
 
