@@ -5,8 +5,9 @@
   python3 tools/notebook/kimodo_datasets.py bin                # CUDA build from the last successful session
   python3 tools/notebook/kimodo_datasets.py status             # which exist, and the --dataset flags to use
 
-worker/kimodo/setup.sh finds both under /kaggle/input and skips the 8 GB download and the ~10 min build.
-Attach them to terminal runs with kaggle_run.py --dataset USER/kimodo-q8 --dataset USER/kimodo-cuda-bin.
+worker/kimodo/setup.sh finds both under /kaggle/input and skips the ~20 min build / the 8 GB download.
+Attach the build with kaggle_run.py --dataset USER/kimodo-cuda-bin. The weights dataset is a fallback only:
+loading 8 GB from the dataset mount took ~6 min, the Hugging Face download ~2 min.
 
 Needs the Kaggle CLI with a token (~/.kaggle/access_token). The Kaggle username is read from
 `kaggle config view` unless --user is given. Datasets are created private.
@@ -115,10 +116,11 @@ def cmd_status(a, user):
         ds = f"{user}/{name}"
         ok = exists(ds)
         print(f"{ds:40s} {'ready' if ok else 'missing or still processing'}")
-        if ok:
+        if ok and name == "kimodo-cuda-bin":
             flags.append(f"--dataset {ds}")
     if flags:
         print("\nadd to kaggle_run.py --mode run:  " + " ".join(flags))
+    print(f"(--dataset {user}/kimodo-q8 only as a fallback when Hugging Face is unreachable: ~6 min to load)")
 
 
 def main():

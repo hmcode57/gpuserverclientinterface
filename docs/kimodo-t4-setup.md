@@ -75,10 +75,13 @@ Put it where Kaggle can read it:
 
 Never paste the token into the notebook cell itself.
 
-### 1.5 Optional: make later sessions start in 1–2 minutes instead of ~10–15
+### 1.5 Optional: make later sessions start in ~2.5 minutes instead of ~25
 
-Two private datasets: the weights (skips the 8 GB download) and the CUDA build (skips the ~10 min build).
-`setup.sh` finds both under `/kaggle/input`. `tools/notebook/kimodo_datasets.py` creates them; it reads your
+Two private datasets: the CUDA build (skips the ~20 min build, **use this one**) and the weights.
+`setup.sh` finds both under `/kaggle/input`. The weights dataset is slower than downloading: loading the 8 GB
+from the dataset mount took ~6 min, the Hugging Face download ~2 min plus 7 s to load (measured on T4 x2), so
+attach it only as a fallback when Hugging Face is unreachable. Kaggle unpacks the uploaded
+`kimodo-cuda-bin.tar.gz`; `setup.sh` uses the unpacked files. `tools/notebook/kimodo_datasets.py` creates them; it reads your
 Kaggle username from the Kaggle CLI (1.3), so the commands are the same for everyone.
 
 **Weights, any time** (8 GB upload, once; Kaggle then needs a few minutes to process it):
@@ -109,10 +112,10 @@ python3 tools/notebook/kimodo_datasets.py status
 - Terminal start (3B): add the `--dataset ...` flags that `status` prints to the `kaggle_run.py --mode run`
   command. Every push replaces the notebook's inputs, so inputs added in the web editor don't carry over to
   terminal runs.
-- Browser start (3A): *Add Input* → your datasets → add both.
+- Browser start (3A): *Add Input* → your datasets → add `kimodo-cuda-bin`.
 
-The `kimodo` log (`data/reports/kaggleA/kimodo_gpu0.log`) then shows `binary from /kaggle/input/...`, and
-`/kaggle/working/kimodo/weights.log` shows `weights from dataset ...`, instead of a build and a download.
+The `kimodo` log (`data/reports/kaggleA/kimodo_gpu0.log`) then shows `binary from /kaggle/input/kimodo-cuda-bin (unpacked by Kaggle)`
+instead of a build.
 
 ---
 
@@ -210,7 +213,7 @@ python3 tools/notebook/kaggle_run.py --kernel $KUSER/kimodo-t4 --mode run \
 ```
 
 With the datasets from 1.5, add the flags `kimodo_datasets.py status` prints after `--token-dataset ...`,
-e.g. `--dataset $KUSER/kimodo-q8 --dataset $KUSER/kimodo-cuda-bin`.
+normally just `--dataset $KUSER/kimodo-cuda-bin` (weights from Hugging Face, see 1.5).
 
 It pushes the notebook (T4 x2, `QUEUE_URL` filled in from `run/url`) as a new version, starts it and follows
 its log.
@@ -248,9 +251,9 @@ kaggleA-gpu1   ready  family=kimodo job=-  seen 2s ago  {"backend": "CUDA0", ...
 
 | Session | Until ready |
 |---|---|
-| First (build + 8 GB download) | about 10–15 min |
-| Weights dataset only (build still runs) | about 10 min |
-| Both datasets from 1.5 | about 1–2 min |
+| First (build + 8 GB download) | about 24 min (build ~20 min, download overlaps it) |
+| Weights dataset only (build still runs) | about 26 min (6 min load from the dataset mount) |
+| CUDA build dataset, weights from Hugging Face | about 2.5 min (expected: 2 min download + 7 s load) |
 
 You can submit prompts (Part 5) before the workers are ready; they wait in the queue.
 

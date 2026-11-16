@@ -7,8 +7,13 @@
 #
 # Shortcuts (checked first, both optional):
 #   a Kaggle dataset holding Llama-3-Kimodo-Q8_0.gguf + tokenizer.gguf   -> no 8 GB download
-#   a Kaggle dataset holding a kimodo-cuda-bin.tar.gz made by this script -> no CUDA build (~10 min)
+#   a Kaggle dataset holding a kimodo-cuda-bin.tar.gz made by this script -> no CUDA build (~20 min)
+#     Kaggle unpacks the .tar.gz on upload and turns its symlinks into empty files, so the unpacked files
+#     (kmd-encode-serve + libggml*.so.X.Y.Z) are accepted too and the .so links are recreated here.
+#   The weights dataset is optional and slower: loading 8 GB from the dataset mount took ~6 min, the
+#   Hugging Face download ~2 min plus 7 s to load from /tmp.
 set -euo pipefail
+INPUT=${KIMODO_INPUT:-/kaggle/input}                    # where attached datasets are mounted
 
 if [ -d /kaggle/working ]; then KIMODO_HOME=${KIMODO_HOME:-/kaggle/working/kimodo}; else KIMODO_HOME=${KIMODO_HOME:-$PWD/kimodo}; fi
 WEIGHTS_DIR=${KIMODO_WEIGHTS_DIR:-/tmp/kimodo-weights}   # /tmp: larger than /kaggle/working, not saved
@@ -30,7 +35,7 @@ log() { echo "[kimodo-setup +$(( $(date +%s) - t0 ))s] $*"; }
 # ---- weights (in the background, overlapping the build) ----
 fetch_weights() {
   local found
-  found=$(find /kaggle/input -name "$Q8" 2>/dev/null | head -1 || true)
+  found=$(find "$INPUT" -name "$Q8" 2>/dev/null | head -1 || true)
   if [ -n "$found" ] && [ -f "$(dirname "$found")/tokenizer.gguf" ]; then
     ln -sf "$found" "$WEIGHTS_DIR/$Q8"; ln -sf "$(dirname "$found")/tokenizer.gguf" "$WEIGHTS_DIR/tokenizer.gguf"
     log "weights from dataset $(dirname "$found")"; return 0
@@ -50,11 +55,21 @@ WPID=$!
 
 # ---- binary ----
 BIN_DIR="$KIMODO_HOME/bin"
-prebuilt=$(find /kaggle/input -name kimodo-cuda-bin.tar.gz 2>/dev/null | head -1 || true)
+prebuilt=$(find "$INPUT" -name kimodo-cuda-bin.tar.gz 2>/dev/null | head -1 || true)
+unpacked=$(find "$INPUT" -name kmd-encode-serve -type f -size +0 2>/dev/null | head -1 || true)
 if [ -x "$BIN_DIR/kmd-encode-serve" ]; then
   log "binary already built in $BIN_DIR"
 elif [ -n "$prebuilt" ]; then
   log "binary from $prebuilt"; mkdir -p "$BIN_DIR"; tar -xzf "$prebuilt" -C "$BIN_DIR"
+elif [ -n "$unpacked" ]; then
+  src=$(dirname "$unpacked"); log "binary from $src (unpacked by Kaggle)"; mkdir -p "$BIN_DIR"
+  cp "$unpacked" "$BIN_DIR/"; chmod +x "$BIN_DIR/kmd-encode-serve"   # dataset files are not executable
+  for f in "$src"/lib*.so.*.*.*; do                    # the real libraries; skip the emptied links
+    [ -s "$f" ] || continue
+    n=$(basename "$f"); cp "$f" "$BIN_DIR/$n"            # copied, not linked: /kaggle/input may be noexec
+    base=${n%%.so.*}.so; major=${n#*.so.}; major=${major%%.*}
+    ln -sf "$n" "$BIN_DIR/$base.$major"; ln -sf "$base.$major" "$BIN_DIR/$base"
+  done
 else
   export PATH="/usr/local/cuda/bin:$PATH"
   command -v nvcc >/dev/null || { echo "nvcc not found: this image has no CUDA toolkit" >&2; exit 1; }
