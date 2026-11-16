@@ -162,6 +162,9 @@ class Follow:
     def __init__(self, q, a):
         self.q, self.a, self.lock = q, a, threading.Lock()
         self.path = a.follow
+        if not os.path.isfile(self.path):
+            sys.exit(f"--follow: {self.path} does not exist (check the path; create an empty file to start from "
+                     "nothing: touch {self.path})".replace("{self.path}", self.path))
         os.makedirs(a.out, exist_ok=True)
         self.state_path = os.path.join(a.out, f".follow-{os.path.basename(self.path)}.json")
         if os.path.exists(self.state_path):
@@ -245,6 +248,9 @@ class Follow:
                     st = os.stat(self.path)
                     sig = (st.st_mtime_ns, st.st_size, st.st_ino)
                 except FileNotFoundError:
+                    if seen is not None:
+                        print(f"[follow] {self.path} disappeared; waiting for it to come back", file=sys.stderr,
+                              flush=True)
                     sig = None
                 if sig != seen:
                     seen, changed_at = sig, time.time()
