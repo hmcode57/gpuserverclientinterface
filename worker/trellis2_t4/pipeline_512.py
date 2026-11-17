@@ -16,6 +16,8 @@ import copy, json, os, sys
 REPO = "microsoft/TRELLIS.2-4B"
 MODELS_512 = ("sparse_structure_flow_model", "sparse_structure_decoder", "shape_slat_flow_model_512",
               "shape_slat_decoder", "tex_slat_flow_model_512", "tex_slat_decoder")
+FLOW_MODELS = ("sparse_structure_flow_model", "shape_slat_flow_model_512", "tex_slat_flow_model_512")
+DTYPES = ("fp16", "fp32", "bf16")   # flow-model precision; the checkpoints are bf16, the T4 has no bf16 tensor cores
 NO_REMBG = "none"
 
 
@@ -76,9 +78,27 @@ def official_config(local_dirs=None):
         return json.load(f)
 
 
-def load(cfg_dir, rembg=NO_REMBG, dino=None, local_dirs=None, official=None):
+def set_flow_dtype(pipe, dtype):
+    """Run the three flow models in fp16, fp32 or bf16 with upstream's own convert_to(), which converts the
+    transformer blocks and leaves the embedders, output layers and LayerNorm32 layers in fp32. Raises if a weight
+    doesn't fit the new type (bf16 reaches 3e38, fp16 only 65504)."""
+    import torch
+    from trellis2.modules.utils import str_to_dtype
+    if dtype not in DTYPES:
+        raise ValueError(f"dtype {dtype!r}: use one of {DTYPES}")
+    for name in FLOW_MODELS:
+        model = pipe.models[name]
+        model.convert_to(str_to_dtype(dtype))
+        bad = [n for n, p in model.named_parameters() if not torch.isfinite(p).all()]
+        if bad:
+            raise ValueError(f"{name} has weights that overflow {dtype}: {bad[:5]}")
+    pipe.flow_dtype = dtype
+
+
+def load(cfg_dir, rembg=NO_REMBG, dino=None, local_dirs=None, official=None, dtype=None):
     """Write the reduced pipeline.json to cfg_dir (writable) and load the pipeline from it, on the CPU.
-    Upstream's low_vram mode then moves one model at a time to the GPU during run()."""
+    Upstream's low_vram mode then moves one model at a time to the GPU during run().
+    dtype: flow-model precision, default $TRELLIS_DTYPE or fp16."""
     from trellis2.pipelines import Trellis2ImageTo3DPipeline, rembg as rembg_mod
     rembg_mod.NoBackgroundRemoval = NoBackgroundRemoval
     cfg = config_512(official or official_config(local_dirs), rembg, dino, local_dirs)
@@ -90,6 +110,7 @@ def load(cfg_dir, rembg=NO_REMBG, dino=None, local_dirs=None, official=None):
     pipe = Trellis2ImageTo3DPipeline.from_pretrained(cfg_dir)
     if sorted(pipe.models) != sorted(MODELS_512):
         raise RuntimeError(f"loaded {sorted(pipe.models)}, expected {sorted(MODELS_512)}")
+    set_flow_dtype(pipe, dtype or os.environ.get("TRELLIS_DTYPE", "fp16"))
     return pipe
 
 

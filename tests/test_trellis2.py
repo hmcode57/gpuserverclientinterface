@@ -1,4 +1,4 @@
-"""TRELLIS.2 patches and the 512-only loader, on CPU. Run:
+"""TRELLIS.2 patches, the 512-only loader and fp16 flow models, on CPU. Run:
     TRELLIS2_SRC=/path/to/patched/TRELLIS.2 python3 tests/test_trellis2.py
 TRELLIS2_SRC is a checkout made by worker/trellis2_t4/setup.sh (it is $TRELLIS2_HOME/src). Needs torch,
 torchvision, numpy, pillow, easydict, safetensors, transformers and huggingface_hub; the CUDA-only modules
@@ -128,6 +128,10 @@ class Loader512(unittest.TestCase):
             loaded.append(path)
             if path.startswith("/"):
                 raise FileNotFoundError(path)                     # upstream's first try, f"{cfg_dir}/{path}"
+            if "ss_flow" in path:
+                return tiny_flow("SparseStructureFlowModel")
+            if "slat_flow" in path:
+                return tiny_flow("SLatFlowModel")
             return torch.nn.Linear(1, 1)
 
         class FakeDino:
@@ -145,6 +149,70 @@ class Loader512(unittest.TestCase):
         self.assertEqual(pipe.default_pipeline_type, "512")
         with self.assertRaisesRegex(ValueError, "transparent background"):
             pipe.preprocess_image(Image.new("RGB", (32, 32)))
+        self.assertEqual(pipe.flow_dtype, "fp16")
+        for name in pipeline_512.FLOW_MODELS:
+            m = pipe.models[name]
+            self.assertIs(m.dtype, torch.float16)
+            self.assertIs(m.blocks[0].self_attn.to_qkv.weight.dtype, torch.float16)
+            self.assertIs(m.input_layer.weight.dtype, torch.float32)   # upstream keeps the edges in fp32
+
+
+def tiny_flow(cls_name, dtype="bfloat16"):
+    """The real flow model classes with the checkpoints' options (rope, shared modulation, qk RMS norm, bf16),
+    shrunk to one block and 64 channels, random weights including the zero-initialised output layer."""
+    import trellis2.models as models
+    torch.manual_seed(0)
+    common = dict(model_channels=64, cond_channels=32, num_blocks=1, num_heads=2, mlp_ratio=4, pe_mode="rope",
+                  share_mod=True, initialization="scaled", qk_rms_norm=True, qk_rms_norm_cross=True, dtype=dtype)
+    if cls_name == "SparseStructureFlowModel":
+        m = models.SparseStructureFlowModel(resolution=4, in_channels=8, out_channels=8, **common)
+    else:
+        m = models.SLatFlowModel(resolution=8, in_channels=8, out_channels=8, **common)
+    with torch.no_grad():
+        for p in m.out_layer.parameters():
+            p.normal_(0, 0.1)
+    return m.eval()
+
+
+@needs
+class FlowPrecision(unittest.TestCase):
+    """fp16 against fp32 on the same weights. CPU only checks that the fp16 path runs and stays close; the
+    T4 numbers come from the parity tool in milestone 2."""
+
+    def pair(self, cls_name):
+        import copy
+        ref = tiny_flow(cls_name, dtype="float32")
+        half = copy.deepcopy(ref)
+        half.convert_to(torch.float16)
+        return ref, half
+
+    def assert_close_rel(self, a, b, tol=2e-2):
+        self.assertTrue(torch.isfinite(b).all())
+        rel = ((a.float() - b.float()).norm() / a.float().norm()).item()
+        self.assertLess(rel, tol, f"relative error {rel:.3g}")
+
+    def test_sparse_structure_flow_fp16(self):
+        ref, half = self.pair("SparseStructureFlowModel")
+        x, t, cond = torch.randn(1, 8, 4, 4, 4), torch.tensor([500.0]), torch.randn(1, 5, 32)
+        with torch.no_grad():
+            self.assert_close_rel(ref(x, t, cond), half(x, t, cond))
+
+    def test_slat_flow_fp16_uses_sparse_sdpa(self):
+        from trellis2.modules.sparse import SparseTensor
+        ref, half = self.pair("SLatFlowModel")
+        coords = torch.unique(torch.randint(0, 8, (40, 3)), dim=0)
+        coords = torch.cat([torch.zeros(len(coords), 1, dtype=torch.long), coords], 1).int()
+        x = SparseTensor(torch.randn(len(coords), 8), coords)
+        t, cond = torch.tensor([500.0]), torch.randn(1, 5, 32)
+        with torch.no_grad():
+            self.assert_close_rel(ref(x, t, cond).feats, half(x, t, cond).feats)
+
+    def test_overflow_is_reported(self):
+        pipe = types.SimpleNamespace(models={n: tiny_flow("SLatFlowModel") for n in pipeline_512.FLOW_MODELS})
+        with torch.no_grad():
+            pipe.models["tex_slat_flow_model_512"].blocks[0].mlp.mlp[0].weight[0, 0] = 1e6
+        with self.assertRaisesRegex(ValueError, "tex_slat_flow_model_512 has weights that overflow fp16"):
+            pipeline_512.set_flow_dtype(pipe, "fp16")
 
 
 if __name__ == "__main__":

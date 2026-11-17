@@ -59,8 +59,8 @@ ships it, plus decoders, DINOv3 and the background remover, and two workers do n
 
 **Fix (built):** `worker/trellis2_t4/pipeline_512.py` writes a reduced `pipeline.json` (no TRELLIS.2 file
 changes) that names only the sparse-structure flow and decoder, the 512 shape and texture flows and the two
-decoders, and loads from it; a CPU test checks that exactly those six checkpoints are read. Converting to fp16
-at load is still to do (problem 3). bf16 and fp16 are both 2 bytes per weight, so that is
+decoders, and loads from it; a CPU test checks that exactly those six checkpoints are read. It then converts the
+flow models to fp16 (problem 3). bf16 and fp16 are both 2 bytes per weight, so that is
 about 3 × 2.6 GB of flow weights, roughly 8 GB per worker, so two workers fit in 29–31 GB. Keep `low_vram`,
 set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`, use batch 1, and use the smaller GLB settings above.
 VRAM at 512 is expected to fit (largest sub-model about 2.6 GB in fp16 plus activations); the test run
@@ -89,15 +89,21 @@ attention, and fail on unpatched upstream.
 flow models use RMS norm on queries and keys (`qk_rms_norm`) and fp32 LayerNorms (`LayerNorm32`), which lowers
 the fp16 overflow risk. `convert_to(dtype)` exists on the flow models.
 
+**Built (no patch):** `pipeline_512.load()` calls upstream's `convert_to()` on the three flow models, fp16 by
+default (`TRELLIS_DTYPE` or `dtype=` for `fp32`/`bf16`). That converts the transformer blocks and leaves the
+embedders, output layers and `LayerNorm32` in fp32, the same split upstream uses for bf16. It refuses weights
+that overflow fp16 (above 65504). CPU tests on the real model classes, shrunk to one block, check that the
+blocks run in fp16 and stay within 0.05% of fp32 for both flow types (dense and sparse attention).
+
 | Option | Verdict |
 |---|---|
 | keep bf16 | not viable for speed or attention kernels on T4 |
-| **fp16 (chosen)** | fast (tensor cores); check every stage for NaN/inf |
+| **fp16 (chosen, built)** | fast (tensor cores); check every stage for NaN/inf |
 | fp32 | safe, about 5.2 GB per flow model, several times slower; used as a per-stage fallback |
 | hybrid (selected layers in fp32) | only if one stage keeps failing in fp16 |
 
-A patch checks each stage's output with `torch.isfinite` and re-runs only a failing stage in fp32, recording
-that in the job metrics. The parity tool (below) measures fp16 against an fp32 reference stage by stage.
+Still to build, with the stage API: check each stage's output with `torch.isfinite` and re-run only a failing
+stage in fp32, recording that in the job metrics. The parity tool (below) measures fp16 against an fp32 reference stage by stage.
 
 ### 4. Install, compile and Triton
 
@@ -181,7 +187,7 @@ Run the CPU tests with `TRELLIS2_HOME=/tmp/t2 bash worker/trellis2_t4/setup.sh` 
 | Patch | Contents | Problem |
 |---|---|---|
 | sparse `sdpa` backend (built) | per-sequence `torch.nn.functional.scaled_dot_product_attention`, `'sdpa'` accepted in sparse config | 2 |
-| precision setting | `TRELLIS_DTYPE=fp16\|fp32`; convert at load; per-stage NaN check with fp32 retry | 3 |
+| precision setting (conversion built in `pipeline_512.py`, no patch) | `TRELLIS_DTYPE=fp16\|fp32\|bf16`; convert at load; per-stage NaN check with fp32 retry still to do | 3 |
 | 512-only pipeline (built, `pipeline_512.py`, no patch needed) | loads only the 512-path models; background removal off or MIT BiRefNet | 1, 5 |
 | sparse-conv switch | `SPARSE_CONV_BACKEND=spconv` checked against flex_gemm on the decoders (only if Triton fails on the T4) | 4 |
 | stage API | `run_stages()` yields after each stage: progress, NaN checks, lease checks between stages | integration |
@@ -277,7 +283,7 @@ Each GLB is a few MB at about 50k faces with 1024 px textures.
 
 ## Milestones
 
-1. **CPU-tested patches (done 2026-11-17):** sdpa backend, 512-only loader.
+1. **CPU-tested patches (done 2026-11-17):** sdpa backend, 512-only loader, fp16 flow models.
 2. **One Kaggle test run:** build wheels and weights, parity, memory, Triton. Answers problems 1–4.
 3. **Handler, config and viewer.** The viewer can be built earlier, tested with the `echo` handler.
 4. **Production:** seed sweeps through the viewer; stage-split mode and a kimodo family only if needed.
