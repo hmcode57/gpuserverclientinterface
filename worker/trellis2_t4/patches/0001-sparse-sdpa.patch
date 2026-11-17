@@ -1,0 +1,76 @@
+diff --git a/trellis2/modules/sparse/attention/full_attn.py b/trellis2/modules/sparse/attention/full_attn.py
+index 4eb74d2..af67a83 100644
+--- a/trellis2/modules/sparse/attention/full_attn.py
++++ b/trellis2/modules/sparse/attention/full_attn.py
+@@ -9,6 +9,37 @@ __all__ = [
+ ]
+ 
+ 
++def _sdpa_varlen(q, k, v, q_seqlen, kv_seqlen):
++    # q: [TQ, H, Cq], k: [TK, H, Cq], v: [TK, H, Cv]
++    # returns: [TQ, H, Cv]
++    outs = []
++    q_off = 0
++    kv_off = 0
++    for n in range(len(q_seqlen)):
++        qn = q_seqlen[n]
++        kn = kv_seqlen[n]
++        q_i = q[q_off:q_off + qn].transpose(0, 1)   # [H, qn, C]
++        k_i = k[kv_off:kv_off + kn].transpose(0, 1) # [H, kn, C]
++        v_i = v[kv_off:kv_off + kn].transpose(0, 1) # [H, kn, Cv]
++
++        # SDPA expects [B, heads, L, C] or [heads, L, C]. We use [1, H, L, C]
++        q_i = q_i.unsqueeze(0)  # [1, H, qn, C]
++        k_i = k_i.unsqueeze(0)  # [1, H, kn, C]
++        v_i = v_i.unsqueeze(0)  # [1, H, kn, Cv]
++
++        out_i = torch.nn.functional.scaled_dot_product_attention(
++            q_i, k_i, v_i,
++            dropout_p=0.0,
++            is_causal=False
++        )[0]  # [H, qn, Cv]
++
++        outs.append(out_i.transpose(0, 1))  # [qn, H, Cv]
++        q_off += qn
++        kv_off += kn
++
++    return torch.cat(outs, dim=0)  # [TQ, H, Cv]
++
++
+ @overload
+ def sparse_scaled_dot_product_attention(qkv: VarLenTensor) -> VarLenTensor:
+     """
+@@ -211,6 +242,12 @@ def sparse_scaled_dot_product_attention(*args, **kwargs):
+             max_q_seqlen = max(q_seqlen)
+             max_kv_seqlen = max(kv_seqlen)
+         out = flash_attn_3.flash_attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_kv, max_q_seqlen, max_kv_seqlen)
++    elif config.ATTN == 'sdpa':
++        if num_all_args == 1:
++            q, k, v = qkv.unbind(dim=1)
++        elif num_all_args == 2:
++            k, v = kv.unbind(dim=1)
++        out = _sdpa_varlen(q, k, v, q_seqlen, kv_seqlen)
+     else:
+         raise ValueError(f"Unknown attention module: {config.ATTN}")
+     
+diff --git a/trellis2/modules/sparse/config.py b/trellis2/modules/sparse/config.py
+index a5f4d53..6b1dde4 100644
+--- a/trellis2/modules/sparse/config.py
++++ b/trellis2/modules/sparse/config.py
+@@ -21,7 +21,7 @@ def __from_env():
+         CONV = env_sparse_conv_backend
+     if env_sparse_debug is not None:
+         DEBUG = env_sparse_debug == '1'
+-    if env_sparse_attn_backend is not None and env_sparse_attn_backend in ['xformers', 'flash_attn', 'flash_attn_3']:
++    if env_sparse_attn_backend is not None and env_sparse_attn_backend in ['xformers', 'flash_attn', 'flash_attn_3', 'sdpa']:
+         ATTN = env_sparse_attn_backend
+         
+     print(f"[SPARSE] Conv backend: {CONV}; Attention backend: {ATTN}")
+@@ -38,6 +38,6 @@ def set_debug(debug: bool):
+     global DEBUG
+     DEBUG = debug
+ 
+-def set_attn_backend(backend: Literal['xformers', 'flash_attn']):
++def set_attn_backend(backend: Literal['xformers', 'flash_attn', 'flash_attn_3', 'sdpa']):
+     global ATTN
+     ATTN = backend

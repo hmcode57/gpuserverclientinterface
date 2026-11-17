@@ -1,8 +1,9 @@
-# TRELLIS.2 on free Kaggle T4s (architecture, not built yet)
+# TRELLIS.2 on free Kaggle T4s (architecture; milestone 1 built)
 
 Plan for running Microsoft's [TRELLIS.2](https://github.com/microsoft/TRELLIS.2) image-to-3D model through this
 queue on the free Kaggle tier, for stylized and cartoon assets used in videos. **Nothing here has run on a GPU
-yet.** Statements marked *verified* were checked against the TRELLIS.2 source (cloned November 2026); the rest
+yet.** Milestone 1 (sdpa patch, 512-only loader) is built and CPU-tested in `worker/trellis2_t4/`.
+Statements marked *verified* were checked against the TRELLIS.2 source (cloned November 2026); the rest
 are estimates or open questions that the first Kaggle test run (milestone 2) answers.
 
 ```text
@@ -10,7 +11,7 @@ laptop                                   Kaggle T4 x2 (free tier, temporary)
 ──────                                   ───────────────────────────────────
 viewer.py ──► queue_server.py ◄─tunnel── supervise.py
  (submit,      (unchanged)                 ├─ worker gpu0 ─┐ worker/handlers/trellis2.py
-  grid,                                    └─ worker gpu1 ─┘   └─ trellis2-t4 (fork of TRELLIS.2)
+  grid,                                    └─ worker gpu1 ─┘   └─ TRELLIS.2 @ pinned commit + our patches
   3D view,                                 /kaggle/input/
   compare)                                   ├─ trellis2-t4-wheels    (compiled once)
                                              └─ trellis2-512-weights  (fp16, 512 path only)
@@ -50,14 +51,16 @@ no tensor cores.
 
 *Verified:* `Pipeline.from_pretrained` loads every model in `pipeline.json`, including the 1024-resolution flow
 models the `512` path never uses: five flow models of 1.3B parameters each (`dit_1_3B`, 1536 channels, 30
-blocks). The flow model classes default to `dtype='float32'`; whether the checkpoint configs override that is
-unverified (huggingface.co was unreachable). So one worker needs roughly 13–26 GB of CPU RAM as upstream
-ships it, and two workers do not fit.
+blocks). *Verified:* the flow checkpoint configs set `"dtype": "bfloat16"` (the class default is fp32), so each
+flow model holds about 2.6 GB. One worker needs roughly 13 GB of CPU RAM for the flow models alone as upstream
+ships it, plus decoders, DINOv3 and the background remover, and two workers do not fit.
 
 *Verified:* `low_vram` (default `True`) moves one sub-model at a time to the GPU and back.
 
-**Fix:** the fork's 512-only loader (`model_names_to_load` already exists as a hook) loads the sparse-structure
-flow and decoder, the 512 shape and texture flows and the two decoders, converted to fp16 at load. That is
+**Fix (built):** `worker/trellis2_t4/pipeline_512.py` writes a reduced `pipeline.json` (no TRELLIS.2 file
+changes) that names only the sparse-structure flow and decoder, the 512 shape and texture flows and the two
+decoders, and loads from it; a CPU test checks that exactly those six checkpoints are read. Converting to fp16
+at load is still to do (problem 3). bf16 and fp16 are both 2 bytes per weight, so that is
 about 3 × 2.6 GB of flow weights, roughly 8 GB per worker, so two workers fit in 29–31 GB. Keep `low_vram`,
 set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`, use batch 1, and use the smaller GLB settings above.
 VRAM at 512 is expected to fit (largest sub-model about 2.6 GB in fp16 plus activations); the test run
@@ -74,9 +77,11 @@ attention.
 | Option | Pros | Cons |
 |---|---|---|
 | xformers | no code change, supports T4 in fp16 | the wheel must match Kaggle's exact torch; building it takes 30+ min |
-| **sdpa patch (chosen)** | about 10 lines for the single-sequence case plus a padded batch path; no extra dependency, survives torch updates | small fork patch |
+| **sdpa patch (chosen, built)** | `worker/trellis2_t4/patches/0001-sparse-sdpa.patch`: a per-sequence `scaled_dot_product_attention` loop copied from ComfyUI-Trellis2; no extra dependency, survives torch updates | small patch |
 
-Settings: `ATTN_BACKEND=sdpa`, `SPARSE_ATTN_BACKEND=sdpa` (after the patch).
+Settings: `ATTN_BACKEND=sdpa`, `SPARSE_ATTN_BACKEND=sdpa` (after the patch). The CPU tests compare all four
+call forms (packed qkv, sparse q with dense kv, separate q/k/v, dense q with sparse kv) against plain softmax
+attention, and fail on unpatched upstream.
 
 ### 3. Precision (T4 has no bf16 hardware)
 
@@ -91,7 +96,7 @@ the fp16 overflow risk. `convert_to(dtype)` exists on the flow models.
 | fp32 | safe, about 5.2 GB per flow model, several times slower; used as a per-stage fallback |
 | hybrid (selected layers in fp32) | only if one stage keeps failing in fp16 |
 
-The fork checks each stage's output with `torch.isfinite` and re-runs only a failing stage in fp32, recording
+A patch checks each stage's output with `torch.isfinite` and re-runs only a failing stage in fp32, recording
 that in the job metrics. The parity tool (below) measures fp16 against an fp32 reference stage by stage.
 
 ### 4. Install, compile and Triton
@@ -118,7 +123,7 @@ that in the job metrics. The parity tool (below) measures fp16 against an fp32 r
   - **TF32:** FlexGEMM sets `allow_tf32 = not torch.version.hip`, i.e. on for every NVIDIA GPU, and passes
     `input_precision='tf32'` to `tl.dot`. The T4 has no TF32. With fp16 decoders it does not apply, but for
     fp32 fallbacks the handler sets `flex_gemm.kernels.triton.spconv.config.allow_tf32 = False` when compute
-    capability is below 8.0 (one line, no fork patch).
+    capability is below 8.0 (one line, no TRELLIS.2 patch).
   - **Shared memory:** the default CUDA tile configs go up to 128×256×64 with 3–5 stages, more than the
     T4's 64 KB per block. Triton's autotuner, which FlexGEMM's Triton autotuner extends, skips configs
     that fail with out-of-resources, and the smaller tiles (64×32, 32×64) fit. To confirm on the T4.
@@ -136,12 +141,14 @@ that in the job metrics. The parity tool (below) measures fp16 against an fp32 r
 
 ### 5. Gated and licensed models
 
-- **Image encoder:** DINOv3 (`facebook/dinov3-vitl16-pretrain-lvd1689m`). Possibly gated; accept its license on
-  Hugging Face, download it once in the build run and keep it in the private weights dataset.
+- **Image encoder:** DINOv3 (`facebook/dinov3-vitl16-pretrain-lvd1689m`). *Verified:* gated with manual
+  approval (Hugging Face API, 2026-11-17). Request access on Hugging Face, download it once in the build run and
+  keep it in the private weights dataset; `pipeline_512.load(dino=...)` takes a local path.
 - **Background removal:** `pipeline.json` points to `briaai/RMBG-2.0`, reported as CC BY-NC 4.0 (no
   commercial use). *Verified:* it is loaded on every start, and skipped at inference only when the input has
-  an alpha channel. Fix: the fork doesn't load it when inputs are RGBA, or swaps to `ZhengPeng7/BiRefNet`
-  (MIT, the code's own default).
+  an alpha channel. Fix (built): `pipeline_512` doesn't load it by default (`rembg='none'`: inputs must have
+  transparency, otherwise a clear error), or swaps to `ZhengPeng7/BiRefNet` (MIT) with
+  `rembg='ZhengPeng7/BiRefNet'`.
 
 ## Two GPUs: independent workers, not a stage split
 
@@ -154,27 +161,33 @@ matter.
 | Throughput | both GPUs always busy | one GPU waits when stages are unbalanced |
 | VRAM headroom per stage | best: one model at a time (`low_vram`) | less: GPU 0 keeps DINOv3 and two flow models resident (about 6 GB) |
 | CPU RAM | two weight copies (about 2 × 8 GB with the 512 loader) | one copy |
-| Code | `--gpus auto`, works today | fork patch mapping each stage to a device; one worker with `--gpus all` |
+| Code | `--gpus auto`, works today | patch mapping each stage to a device; one worker with `--gpus all` |
 
 Use the stage split only if the test run shows two workers run out of CPU RAM.
 
 ## Components
 
-### Repo `trellis2-t4` (fork of microsoft/TRELLIS.2, to be created)
+### TRELLIS.2 patches (`worker/trellis2_t4/`, no fork)
 
-Each patch is separate and switched on by an environment variable, so upstream merges stay easy and the fork
-behaves like upstream with nothing set.
+No TRELLIS.2 fork and no local copy: `worker/trellis2_t4/setup.sh` (a session phase) clones microsoft/TRELLIS.2
+at a pinned commit on Kaggle and applies `patches/*.patch` with `git apply --check` first, so an upstream change
+under a patch fails loudly. Code that doesn't have to change TRELLIS.2 files (like the 512-only loader) lives
+next to it as plain Python. Each patch is separate and switched on by an environment variable, so patched
+TRELLIS.2 behaves like upstream with nothing set. Sources and licences of copied code: `worker/trellis2_t4/licences.md`.
+
+Run the CPU tests with `TRELLIS2_HOME=/tmp/t2 bash worker/trellis2_t4/setup.sh` and then
+`TRELLIS2_SRC=/tmp/t2/src python3 tests/test_trellis2.py` (needs CPU torch and torchvision).
 
 | Patch | Contents | Problem |
 |---|---|---|
-| sparse `sdpa` backend | single-sequence path via `torch.nn.functional.scaled_dot_product_attention`, padded batch path, `'sdpa'` accepted in sparse config | 2 |
+| sparse `sdpa` backend (built) | per-sequence `torch.nn.functional.scaled_dot_product_attention`, `'sdpa'` accepted in sparse config | 2 |
 | precision setting | `TRELLIS_DTYPE=fp16\|fp32`; convert at load; per-stage NaN check with fp32 retry | 3 |
-| 512-only pipeline | loads only the 512-path models; background removal optional or MIT BiRefNet | 1, 5 |
+| 512-only pipeline (built, `pipeline_512.py`, no patch needed) | loads only the 512-path models; background removal off or MIT BiRefNet | 1, 5 |
 | sparse-conv switch | `SPARSE_CONV_BACKEND=spconv` checked against flex_gemm on the decoders (only if Triton fails on the T4) | 4 |
 | stage API | `run_stages()` yields after each stage: progress, NaN checks, lease checks between stages | integration |
 | stage dumps | save each stage's tensors for parity checks (kimodo.cpp `reference/` method) | 3 |
 | device per stage (later, if needed) | stage-split mode | 1 (fallback) |
-| CPU tests | sdpa against naive attention, 512 loader | no GPU needed |
+| CPU tests (built, `tests/test_trellis2.py`) | sdpa against naive attention, 512 loader | no GPU needed |
 
 ### This repo (gpuserverclientinterface)
 
@@ -264,18 +277,18 @@ Each GLB is a few MB at about 50k faces with 1024 px textures.
 
 ## Milestones
 
-1. **Fork and CPU-tested patches:** sdpa backend, 512-only loader.
+1. **CPU-tested patches (done 2026-11-17):** sdpa backend, 512-only loader.
 2. **One Kaggle test run:** build wheels and weights, parity, memory, Triton. Answers problems 1–4.
 3. **Handler, config and viewer.** The viewer can be built earlier, tested with the `echo` handler.
 4. **Production:** seed sweeps through the viewer; stage-split mode and a kimodo family only if needed.
 
 ## Open questions (answered by milestone 2)
 
-- Do the flow checkpoints set `dtype` (bf16) or run in fp32 by default?
+- ~~Do the flow checkpoints set `dtype` (bf16) or run in fp32 by default?~~ bf16 (answered in milestone 1).
 - Does fp16 stay finite through all stages, and how far does it drift from fp32?
 - Do FlexGEMM's Triton sparse convolutions run on the T4, how long does first-use autotuning take, and does
   `spconv` load these weights correctly if needed?
-- Is DINOv3 gated for your account?
+- Is DINOv3 gated? Yes, manual approval: has your account been approved?
 - Peak VRAM per stage and CPU RAM per worker; seconds per job at the stylized settings.
 
 ## Sources
