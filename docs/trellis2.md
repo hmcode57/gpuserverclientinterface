@@ -100,11 +100,39 @@ that in the job metrics. The parity tool (below) measures fp16 against an fp32 r
   (`TORCH_CUDA_ARCH_LIST=7.5`), which doesn't need a GPU, so try a CPU session first and fall back to a GPU
   session if `nvcc` is missing there. Save them as the private dataset `trellis2-t4-wheels`; every session
   then installs from it in about a minute via `--requirements`.
-- **Triton:** officially supports compute capability 8.0+; the T4 is 7.5. *Verified:* `flex_gemm` (Triton) is
-  imported at load by `trellis2/representations/mesh/base.py`, is the default sparse-convolution backend, and
-  is used by `o_voxel/postprocess.py` (`grid_sample_3d`) for GLB export. Fixes: `SPARSE_CONV_BACKEND=spconv`
-  (`conv_spconv.py` exists; untested with these weights) and a plain-PyTorch `grid_sample_3d` fallback in the
-  fork. **This is the highest remaining risk.**
+- **FlexGEMM is two things** (*verified* in [FlexGEMM](https://github.com/JeffreyXiang/FlexGEMM), `main`,
+  November 2026):
+  - **A CUDA extension** (`flex_gemm.kernels.cuda`): the hash map, neighbour maps, serialization and
+    `grid_sample_3d`. GLB export (`o_voxel/postprocess.py`) and `trellis2/representations/mesh/base.py` use
+    only this part, so **GLB export does not need Triton**. It is ordinary CUDA C++ compiled like the other
+    extensions. Its `setup.py` sets no CUDA arch, so `TORCH_CUDA_ARCH_LIST=7.5` decides it (without it, a build
+    on a machine without a GPU compiles for every arch, which is slow). It also ships
+    `grid_sample_3d_torch`, but that still calls the CUDA hash map, so it is not a CUDA-free fallback.
+  - **Triton kernels:** only the sparse convolutions (`kernels/triton/spconv`), the default
+    `SPARSE_CONV_BACKEND`. In the 512 path those run in the fp16 VAE decoders; the flow models have no sparse
+    convolutions.
+- **Triton on the T4:** Triton's README lists compute capability 8.0+ as officially supported; the T4 is 7.5.
+  In practice PyTorch itself generates Triton kernels for 7.x GPUs: `torch.compile` refuses only below 7.0
+  (`GPUTooOldForTriton` in `torch/_inductor/scheduler.py`). fp16 `tl.dot` has a Turing tensor-core path.
+  Details that matter on the T4:
+  - **TF32:** FlexGEMM sets `allow_tf32 = not torch.version.hip`, i.e. on for every NVIDIA GPU, and passes
+    `input_precision='tf32'` to `tl.dot`. The T4 has no TF32. With fp16 decoders it does not apply, but for
+    fp32 fallbacks the handler sets `flex_gemm.kernels.triton.spconv.config.allow_tf32 = False` when compute
+    capability is below 8.0 (one line, no fork patch).
+  - **Shared memory:** the default CUDA tile configs go up to 128×256×64 with 3–5 stages, more than the
+    T4's 64 KB per block. Triton's autotuner, which FlexGEMM's Triton autotuner extends, skips configs
+    that fail with out-of-resources, and the smaller tiles (64×32, 32×64) fit. To confirm on the T4.
+  - **Autotuning cost:** FlexGEMM ships tuned configs only for A100 and MI300X (`autotune_cache.json`), so the
+    T4 tunes every new shape key (log of point count, channels, kernel volume) on first use, which makes the
+    first jobs slow. FlexGEMM saves the results to `FLEX_GEMM_AUTOTUNE_CACHE_PATH` (default
+    `~/.flex_gemm/autotune_cache.json`). The handler points it at `/kaggle/working`, the test run warms it up,
+    and the cache ships in the wheels dataset so later sessions skip tuning.
+  - **Version:** FlexGEMM needs `triton>=3.2.0`; use the Triton that comes with Kaggle's torch.
+- **Fallback if the Triton convolutions fail on the T4:** `SPARSE_CONV_BACKEND=spconv` (`conv_spconv.py`
+  exists, `spconv` has prebuilt CUDA 12 wheels; untested with these weights). The CUDA half of FlexGEMM is
+  still needed either way.
+- **Risk:** moderate, down from "highest". The remaining unknowns are the decoders' Triton convolutions on the
+  T4 and how long the first autotuning takes.
 
 ### 5. Gated and licensed models
 
@@ -142,11 +170,11 @@ behaves like upstream with nothing set.
 | sparse `sdpa` backend | single-sequence path via `torch.nn.functional.scaled_dot_product_attention`, padded batch path, `'sdpa'` accepted in sparse config | 2 |
 | precision setting | `TRELLIS_DTYPE=fp16\|fp32`; convert at load; per-stage NaN check with fp32 retry | 3 |
 | 512-only pipeline | loads only the 512-path models; background removal optional or MIT BiRefNet | 1, 5 |
-| flex_gemm fallback | plain-PyTorch `grid_sample_3d`; spconv switch for sparse convolution | 4 |
+| sparse-conv switch | `SPARSE_CONV_BACKEND=spconv` checked against flex_gemm on the decoders (only if Triton fails on the T4) | 4 |
 | stage API | `run_stages()` yields after each stage: progress, NaN checks, lease checks between stages | integration |
 | stage dumps | save each stage's tensors for parity checks (kimodo.cpp `reference/` method) | 3 |
 | device per stage (later, if needed) | stage-split mode | 1 (fallback) |
-| CPU tests | sdpa against naive attention, 512 loader, grid_sample fallback | no GPU needed |
+| CPU tests | sdpa against naive attention, 512 loader | no GPU needed |
 
 ### This repo (gpuserverclientinterface)
 
@@ -176,7 +204,8 @@ from runtime import Handler
 class Trellis2(Handler):
     def load(self):        # 512-only pipeline from /kaggle/input/trellis2-512-weights, fp16, low_vram
         ...
-    def warmup(self):      # one tiny job so Triton/kernels compile before real jobs
+    def warmup(self):      # one tiny job so Triton kernels compile and FlexGEMM autotunes before real jobs
+                           # (FLEX_GEMM_AUTOTUNE_CACHE_PATH under /kaggle/working; allow_tf32 off below cc 8.0)
         ...
     def run(self, job, ctx):
         # ctx.input("image.png") -> run_stages(): after each stage ctx.progress(phase=...), NaN check
@@ -219,7 +248,7 @@ and NOTICE.
    export the 512-only fp16 weights to `/kaggle/working`. Create the datasets `trellis2-t4-wheels` and
    `trellis2-512-weights` from the output. Pin the notebook's environment.
 2. **Test run (once):** parity fp16 against fp32, peak VRAM and RAM with one and two workers, Triton against
-   the spconv and PyTorch fallbacks, time per job. Write the numbers into this document.
+   the spconv backend, FlexGEMM autotuning time (save the cache), time per job. Write the numbers into this document.
 3. **Production sessions:** attach both datasets, then
    ```python
    SESSION_ARGS = ('--session kaggleA --phases preflight,install,workers '
@@ -235,7 +264,7 @@ Each GLB is a few MB at about 50k faces with 1024 px textures.
 
 ## Milestones
 
-1. **Fork and CPU-tested patches:** sdpa backend, 512-only loader, grid_sample fallback.
+1. **Fork and CPU-tested patches:** sdpa backend, 512-only loader.
 2. **One Kaggle test run:** build wheels and weights, parity, memory, Triton. Answers problems 1–4.
 3. **Handler, config and viewer.** The viewer can be built earlier, tested with the `echo` handler.
 4. **Production:** seed sweeps through the viewer; stage-split mode and a kimodo family only if needed.
@@ -244,7 +273,8 @@ Each GLB is a few MB at about 50k faces with 1024 px textures.
 
 - Do the flow checkpoints set `dtype` (bf16) or run in fp32 by default?
 - Does fp16 stay finite through all stages, and how far does it drift from fp32?
-- Does Triton/flex_gemm work on the T4, and does `spconv` load these weights correctly?
+- Do FlexGEMM's Triton sparse convolutions run on the T4, how long does first-use autotuning take, and does
+  `spconv` load these weights correctly if needed?
 - Is DINOv3 gated for your account?
 - Peak VRAM per stage and CPU RAM per worker; seconds per job at the stylized settings.
 
@@ -254,6 +284,10 @@ Each GLB is a few MB at about 50k faces with 1024 px textures.
   `pipelines/trellis2_image_to_3d.py`, `pipelines/rembg/BiRefNet.py`, `modules/sparse/*`, `configs/gen`,
   `configs/scvae`, `o-voxel/o_voxel/postprocess.py`
 - [Triton supported hardware](https://github.com/triton-lang/triton)
+- [FlexGEMM](https://github.com/JeffreyXiang/FlexGEMM): `setup.py`, `flex_gemm/__init__.py`,
+  `flex_gemm/utils/autotuner.py`, `flex_gemm/kernels/triton/spconv/config.py`, `flex_gemm/ops/grid_sample/`
+- [PyTorch `torch/_inductor/scheduler.py`](https://github.com/pytorch/pytorch/blob/main/torch/_inductor/scheduler.py)
+  (`GPUTooOldForTriton` below compute capability 7.0)
 - [TRELLIS.2 texturing_pipeline.json (RMBG-2.0 reference)](https://huggingface.co/microsoft/TRELLIS.2-4B/blob/main/texturing_pipeline.json)
 - [Free 29 GB RAM and 4 CPU cores Kaggle GPU notebooks update](https://lilys.ai/en/notes/google-tpu-20251128/free-kaggle-gpu-29gb-4-cpu-update)
 - [Free cloud GPUs in 2026](https://gpuperhour.com/blog/free-cloud-gpus-and-credits)
