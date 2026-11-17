@@ -3,9 +3,12 @@
 TRELLIS2_SRC is a checkout made by worker/trellis2_t4/setup.sh (it is $TRELLIS2_HOME/src). Needs torch,
 torchvision, numpy, pillow, easydict, safetensors, transformers and huggingface_hub; the CUDA-only modules
 (cumesh, flex_gemm) are replaced by empty stand-ins, since nothing here runs them. The pipeline.json test
-downloads one small file from Hugging Face. Skips everything when TRELLIS2_SRC or torch is missing.
+downloads one small file from Hugging Face. Those tests skip when TRELLIS2_SRC or torch is missing.
+
+Without torch: the weight list, download(), from_ready() and setup.sh end to end (with a stand-in
+huggingface_hub that writes small files, a fake DINOv3 dataset, and a real clone of TRELLIS.2 from GitHub).
 """
-import json, os, sys, tempfile, types, unittest
+import json, os, shutil, subprocess, sys, tempfile, types, unittest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.environ.get("TRELLIS2_SRC")
 os.environ["SPARSE_ATTN_BACKEND"] = "sdpa"      # read once when trellis2.modules.sparse is imported
@@ -23,7 +26,8 @@ if SRC and torch is not None:
     sys.modules["flex_gemm.ops.grid_sample"].grid_sample_3d = None
     from trellis2.modules.sparse import config as sparse_config, VarLenTensor
     from trellis2.modules.sparse.attention.full_attn import sparse_scaled_dot_product_attention as ssdpa
-    from trellis2_t4 import pipeline_512
+
+from trellis2_t4 import pipeline_512  # noqa: E402  (stdlib only at import time)
 
 needs = unittest.skipUnless(SRC and torch is not None, "set TRELLIS2_SRC and install torch")
 
@@ -213,6 +217,137 @@ class FlowPrecision(unittest.TestCase):
             pipe.models["tex_slat_flow_model_512"].blocks[0].mlp.mlp[0].weight[0, 0] = 1e6
         with self.assertRaisesRegex(ValueError, "tex_slat_flow_model_512 has weights that overflow fp16"):
             pipeline_512.set_flow_dtype(pipe, "fp16")
+
+
+# The models section of microsoft/TRELLIS.2-4B's pipeline.json (2026-11-17), enough for the file list.
+OFFICIAL_MODELS = {
+    "sparse_structure_decoder": "microsoft/TRELLIS-image-large/ckpts/ss_dec_conv3d_16l8_fp16",
+    "sparse_structure_flow_model": "ckpts/ss_flow_img_dit_1_3B_64_bf16",
+    "shape_slat_decoder": "ckpts/shape_dec_next_dc_f16c32_fp16",
+    "shape_slat_flow_model_512": "ckpts/slat_flow_img2shape_dit_1_3B_512_bf16",
+    "shape_slat_flow_model_1024": "ckpts/slat_flow_img2shape_dit_1_3B_1024_bf16",
+    "tex_slat_decoder": "ckpts/tex_dec_next_dc_f16c32_fp16",
+    "tex_slat_flow_model_512": "ckpts/slat_flow_imgshape2tex_dit_1_3B_512_bf16",
+    "tex_slat_flow_model_1024": "ckpts/slat_flow_imgshape2tex_dit_1_3B_1024_bf16",
+}
+OFFICIAL = {"args": {"models": OFFICIAL_MODELS, "image_cond_model": {"args": {"model_name": "facebook/dinov3"}},
+                     "rembg_model": {"name": "BiRefNet", "args": {"model_name": "briaai/RMBG-2.0"}}}}
+
+# A stand-in huggingface_hub: "downloads" write a few bytes; pipeline.json gets OFFICIAL. Used in-process and,
+# through PYTHONPATH, by setup.sh's python3.
+FAKE_HUB = '''
+import json, os
+CALLS = os.environ.get("FAKE_HUB_LOG")
+def _write(path, name):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write(json.dumps(%r) if name == "pipeline.json" else "x")
+    if CALLS:
+        open(CALLS, "a").write(name + "\\n")
+def hf_hub_download(repo, name, local_dir=None):
+    path = os.path.join(local_dir, name); _write(path, name); return path
+def snapshot_download(repo, allow_patterns=(), local_dir=None, max_workers=8):
+    for name in allow_patterns:
+        _write(os.path.join(local_dir, name), name)
+    return local_dir
+''' % (OFFICIAL,)
+
+
+def fake_hub_dir(tmp):
+    d = os.path.join(tmp, "fakehub", "huggingface_hub")
+    os.makedirs(d)
+    open(os.path.join(d, "__init__.py"), "w").write(FAKE_HUB)
+    return os.path.dirname(d)
+
+
+class Weights(unittest.TestCase):
+    def test_file_list_is_the_512_files(self):
+        files = pipeline_512.weight_files(OFFICIAL)
+        self.assertEqual(sorted(files), ["microsoft/TRELLIS-image-large", "microsoft/TRELLIS.2-4B"])
+        self.assertEqual(files["microsoft/TRELLIS-image-large"],
+                         ["ckpts/ss_dec_conv3d_16l8_fp16.json", "ckpts/ss_dec_conv3d_16l8_fp16.safetensors"])
+        main = files["microsoft/TRELLIS.2-4B"]
+        self.assertEqual(len(main), 1 + 2 * 5)                        # pipeline.json + 5 models x (.json, .safetensors)
+        self.assertIn("pipeline.json", main)
+        self.assertFalse([f for f in main if "1024" in f])
+
+    def test_download_then_config_points_at_the_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sys.path.insert(0, fake_hub_dir(tmp))
+            saved = sys.modules.pop("huggingface_hub", None)
+            try:
+                local = pipeline_512.download(os.path.join(tmp, "w"))
+            finally:
+                sys.path.pop(0)
+                sys.modules.pop("huggingface_hub", None)
+                if saved:
+                    sys.modules["huggingface_hub"] = saved
+            official = pipeline_512.official_config(local)
+            for path in pipeline_512.config_512(official, local_dirs=local)["args"]["models"].values():
+                for ext in (".json", ".safetensors"):
+                    self.assertTrue(os.path.isfile(path + ext), path + ext)
+
+    def test_from_ready_passes_paths(self):
+        with tempfile.TemporaryDirectory() as home:
+            ready = {"src": "/x/src", "dino": "/tmp/dino", "weights": {"a/b": "/w/a/b"}}
+            json.dump(ready, open(os.path.join(home, "ready.json"), "w"))
+            seen = {}
+            saved = pipeline_512.load
+            pipeline_512.load = lambda cfg_dir, **kw: seen.update(kw, cfg_dir=cfg_dir) or "pipe"
+            try:
+                self.assertEqual(pipeline_512.from_ready(home, dtype="fp32"), "pipe")
+            finally:
+                pipeline_512.load = saved
+                sys.path.remove("/x/src")
+        self.assertEqual(seen, {"cfg_dir": os.path.join(home, "config"), "dino": "/tmp/dino",
+                                "local_dirs": {"a/b": "/w/a/b"}, "dtype": "fp32"})
+
+
+@unittest.skipUnless(shutil.which("git") and shutil.which("flock"), "needs git and flock")
+class SetupScript(unittest.TestCase):
+    def run_setup(self, tmp, **env):
+        e = dict(os.environ, TRELLIS2_HOME=os.path.join(tmp, "home"), TRELLIS2_INPUT=os.path.join(tmp, "input"),
+                 TRELLIS2_WEIGHTS=os.path.join(tmp, "weights"), TRELLIS2_DINO=os.path.join(tmp, "dino"),
+                 PYTHONPATH=fake_hub_dir(tmp) if not os.path.isdir(os.path.join(tmp, "fakehub")) else
+                 os.path.join(tmp, "fakehub"), FAKE_HUB_LOG=os.path.join(tmp, "hub.log"), **env)
+        return subprocess.run(["bash", os.path.join(ROOT, "worker/trellis2_t4/setup.sh")], env=e,
+                              capture_output=True, text=True, timeout=600)
+
+    def fake_dino_dataset(self, tmp):
+        d = os.path.join(tmp, "input", "dinov3-vitl16-hf")
+        os.makedirs(d)
+        json.dump({"model_type": "dinov3_vit", "hidden_size": 1024}, open(os.path.join(d, "config.json"), "w"), indent=2)
+        open(os.path.join(d, "model.safetensors"), "wb").write(os.urandom(4096))
+        return d
+
+    def test_end_to_end(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = self.fake_dino_dataset(tmp)
+            r = self.run_setup(tmp)
+            if r.returncode and "Could not resolve host" in r.stderr:
+                self.skipTest("offline: cannot clone TRELLIS.2")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            ready = json.load(open(os.path.join(tmp, "home", "ready.json")))
+            self.assertEqual(ready["patches"], ["0001-sparse-sdpa.patch"])
+            self.assertIn("'sdpa'", open(os.path.join(ready["src"], "trellis2/modules/sparse/config.py")).read())
+            with open(os.path.join(ready["dino"], "model.safetensors"), "rb") as a, \
+                 open(os.path.join(src, "model.safetensors"), "rb") as b:
+                self.assertEqual(a.read(), b.read())
+            self.assertEqual(sorted(ready["weights"]), ["microsoft/TRELLIS-image-large", "microsoft/TRELLIS.2-4B"])
+            for repo, names in pipeline_512.weight_files(OFFICIAL).items():
+                for n in names:
+                    self.assertTrue(os.path.isfile(os.path.join(ready["weights"][repo], n)), n)
+            again = self.run_setup(tmp)                              # second GPU's phase: nothing to do
+            self.assertEqual(again.returncode, 0)
+            self.assertIn("already set up", again.stdout)
+
+    def test_missing_dino_dataset_fails_early(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "input"))
+            r = self.run_setup(tmp)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("no DINOv3", r.stderr)
+            self.assertFalse(os.path.exists(os.path.join(tmp, "hub.log")))   # nothing downloaded
 
 
 if __name__ == "__main__":

@@ -85,7 +85,7 @@ def make_token_dataset(ds, token_file="run/token"):
             print(kaggle("datasets", "create", "-p", d).strip())
 
 
-def push(kernel, mode, timeout, token_dataset=None, extra="", accelerator="NvidiaTeslaT4"):
+def push(kernel, mode, timeout, token_dataset=None, extra="", accelerator="NvidiaTeslaT4", datasets=()):
     url = queue_url()
     if mode == "probe":
         src = PROBE.replace("__QUEUE_URL__", url)
@@ -109,7 +109,7 @@ def push(kernel, mode, timeout, token_dataset=None, extra="", accelerator="Nvidi
           "nbformat": 4, "nbformat_minor": 4}
     meta = {"id": kernel, "title": slug, "code_file": f"{slug}.ipynb", "language": "python",
             "kernel_type": "notebook", "is_private": True, "enable_gpu": mode == "run", "enable_tpu": False,
-            "enable_internet": True, "dataset_sources": [token_dataset] if token_dataset else [], "kernel_sources": [], "competition_sources": [],
+            "enable_internet": True, "dataset_sources": ([token_dataset] if token_dataset else []) + list(datasets), "kernel_sources": [], "competition_sources": [],
             "model_sources": []}
     with tempfile.TemporaryDirectory() as d:
         json.dump(nb, open(os.path.join(d, f"{slug}.ipynb"), "w"))
@@ -181,6 +181,8 @@ def main():
     ap.add_argument("--accelerator", default="NvidiaTeslaT4", help="Kaggle accelerator for --mode run "
                     "(NvidiaTeslaT4 = T4 x2, NvidiaTeslaP100, ...)")
     ap.add_argument("--any-url", action="store_true", help="allow a run/url that is not a trycloudflare.com address")
+    ap.add_argument("--dataset", action="append", default=[], metavar="USER/SLUG",
+                    help="attach another dataset, mounted under /kaggle/input (repeatable), e.g. a private model copy")
     a = ap.parse_args()
     if "/" not in a.kernel:
         sys.exit("--kernel must be <user>/<slug>")
@@ -191,7 +193,7 @@ def main():
             if not a.token_dataset:
                 sys.exit("--make-token-dataset needs --token-dataset <user>/<slug>")
             make_token_dataset(a.token_dataset, "run/worker_token" if a.worker_token else "run/token")
-        push(a.kernel, a.mode, a.timeout, a.token_dataset, a.extra, a.accelerator)
+        push(a.kernel, a.mode, a.timeout, a.token_dataset, a.extra, a.accelerator, a.dataset)
         time.sleep(5)
     if a.logs or a.no_follow:
         print(status(a.kernel)[1])

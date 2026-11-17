@@ -5,13 +5,18 @@ Upstream's Trellis2ImageTo3DPipeline.from_pretrained loads every model named in 
 remover (briaai/RMBG-2.0, CC BY-NC). This module writes a reduced pipeline.json and loads from that, so no
 TRELLIS.2 source file has to change for it.
 
-    from trellis2_t4.pipeline_512 import load
-    pipe = load("/kaggle/working/trellis2/config")            # weights from Hugging Face
-    pipe = load(cfg_dir, local_dirs={"microsoft/TRELLIS.2-4B": "/kaggle/input/trellis2-512-weights/TRELLIS.2-4B"})
+    from trellis2_t4.pipeline_512 import from_ready, load
+    pipe = from_ready()                                       # what worker/trellis2_t4/setup.sh prepared
+    pipe = load("/kaggle/working/trellis2/config")            # weights straight from Hugging Face
+    pipe = load(cfg_dir, dino="/tmp/dinov3-vitl16-hf",
+                local_dirs={"microsoft/TRELLIS.2-4B": "/tmp/trellis2-weights/microsoft/TRELLIS.2-4B"})
 
-TRELLIS.2 itself must be importable (worker/trellis2_t4/setup.sh puts it in $TRELLIS2_HOME/src).
+    python3 pipeline_512.py download /tmp/trellis2-weights    # the 512 files only; prints the local_dirs JSON
+    python3 pipeline_512.py config                            # the reduced pipeline.json
+
+load() needs TRELLIS.2 importable (setup.sh puts it in $TRELLIS2_HOME/src; from_ready() adds that to sys.path).
 """
-import copy, json, os, sys
+import argparse, copy, json, os, sys
 
 REPO = "microsoft/TRELLIS.2-4B"
 MODELS_512 = ("sparse_structure_flow_model", "sparse_structure_decoder", "shape_slat_flow_model_512",
@@ -78,6 +83,32 @@ def official_config(local_dirs=None):
         return json.load(f)
 
 
+def weight_files(official):
+    """{repo: [file, ...]}: every file the 512 pipeline reads from Hugging Face (pipeline.json and each model's
+    .json and .safetensors). Derived from config_512, so it can't drift from what load() opens."""
+    files = {REPO: ["pipeline.json"]}
+    for path in config_512(official)["args"]["models"].values():
+        owner, name, rest = path.split("/", 2)
+        files.setdefault(f"{owner}/{name}", []).extend([rest + ".json", rest + ".safetensors"])
+    return files
+
+
+def download(dest, max_workers=8):
+    """Download the 512 files into dest/<owner>/<repo>/ (resumes, skips complete files) and return local_dirs."""
+    from huggingface_hub import hf_hub_download, snapshot_download
+    official_path = hf_hub_download(REPO, "pipeline.json", local_dir=os.path.join(dest, REPO))
+    with open(official_path) as f:
+        official = json.load(f)
+    local_dirs = {}
+    for repo, names in weight_files(official).items():
+        local_dirs[repo] = os.path.join(dest, repo)
+        snapshot_download(repo, allow_patterns=names, local_dir=local_dirs[repo], max_workers=max_workers)
+        missing = [n for n in names if not os.path.isfile(os.path.join(local_dirs[repo], n))]
+        if missing:
+            raise FileNotFoundError(f"{repo}: download incomplete, missing {missing}")
+    return local_dirs
+
+
 def set_flow_dtype(pipe, dtype):
     """Run the three flow models in fp16, fp32 or bf16 with upstream's own convert_to(), which converts the
     transformer blocks and leaves the embedders, output layers and LayerNorm32 layers in fp32. Raises if a weight
@@ -98,7 +129,9 @@ def set_flow_dtype(pipe, dtype):
 def load(cfg_dir, rembg=NO_REMBG, dino=None, local_dirs=None, official=None, dtype=None):
     """Write the reduced pipeline.json to cfg_dir (writable) and load the pipeline from it, on the CPU.
     Upstream's low_vram mode then moves one model at a time to the GPU during run().
+    dino: DINOv3 model directory or id, default $TRELLIS2_DINO or the official (gated) id.
     dtype: flow-model precision, default $TRELLIS_DTYPE or fp16."""
+    dino = dino or os.environ.get("TRELLIS2_DINO")
     from trellis2.pipelines import Trellis2ImageTo3DPipeline, rembg as rembg_mod
     rembg_mod.NoBackgroundRemoval = NoBackgroundRemoval
     cfg = config_512(official or official_config(local_dirs), rembg, dino, local_dirs)
@@ -114,6 +147,26 @@ def load(cfg_dir, rembg=NO_REMBG, dino=None, local_dirs=None, official=None, dty
     return pipe
 
 
+def from_ready(home=None, **kw):
+    """load() with what worker/trellis2_t4/setup.sh recorded in $TRELLIS2_HOME/ready.json: the patched source,
+    the downloaded weights and the DINOv3 copy. Keyword arguments (rembg, dtype, ...) are passed on."""
+    home = home or os.environ.get("TRELLIS2_HOME", "/kaggle/working/trellis2")
+    with open(os.path.join(home, "ready.json")) as f:
+        ready = json.load(f)
+    if ready["src"] not in sys.path:
+        sys.path.insert(0, ready["src"])
+    kw.setdefault("dino", ready.get("dino"))
+    kw.setdefault("local_dirs", ready.get("weights"))
+    return load(os.path.join(home, "config"), **kw)
+
+
 if __name__ == "__main__":
-    print(json.dumps(config_512(official_config()), indent=2))
-    sys.exit(0)
+    ap = argparse.ArgumentParser()
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("config", help="print the reduced pipeline.json")
+    sub.add_parser("download", help="download the 512 files, print local_dirs as JSON").add_argument("dest")
+    a = ap.parse_args()
+    if a.cmd == "config":
+        print(json.dumps(config_512(official_config()), indent=2))
+    else:
+        print(json.dumps(download(a.dest)))

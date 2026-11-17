@@ -14,7 +14,8 @@ viewer.py ──► queue_server.py ◄─tunnel── supervise.py
   grid,                                    └─ worker gpu1 ─┘   └─ TRELLIS.2 @ pinned commit + our patches
   3D view,                                 /kaggle/input/
   compare)                                   ├─ trellis2-t4-wheels    (compiled once)
-                                             └─ trellis2-512-weights  (fp16, 512 path only)
+                                             └─ dinov3-vitl16-hf      (private, gated model)
+                                           /tmp/trellis2-weights      (512 files from Hugging Face, per session)
 ```
 
 ## Goal and why it fits
@@ -148,8 +149,12 @@ stage in fp32, recording that in the job metrics. The parity tool (below) measur
 ### 5. Gated and licensed models
 
 - **Image encoder:** DINOv3 (`facebook/dinov3-vitl16-pretrain-lvd1689m`). *Verified:* gated with manual
-  approval (Hugging Face API, 2026-11-17). Request access on Hugging Face, download it once in the build run and
-  keep it in the private weights dataset; `pipeline_512.load(dino=...)` takes a local path.
+  approval (Hugging Face API, 2026-11-17). **Done:** Meta's `dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth`
+  (from the facebookresearch/dinov3 download links) was converted on the laptop with transformers'
+  `convert_dinov3_vit_to_hf.py`, which checked the output against Meta's reference values, and uploaded as the
+  **private** Kaggle dataset `$KUSER/dinov3-vitl16-hf` (your account) (1.21 GB, fp32), with Meta's licence in the dataset
+  as the DINOv3 License requires. Sharing is allowed only under that licence; details and credits in
+  `DINOv3-META.md`. Only ViT-L/16 LVD-1689M fits: the flow models expect its 1024-wide features.
 - **Background removal:** `pipeline.json` points to `briaai/RMBG-2.0`, reported as CC BY-NC 4.0 (no
   commercial use). *Verified:* it is loaded on every start, and skipped at inference only when the input has
   an alpha channel. Fix (built): `pipeline_512` doesn't load it by default (`rembg='none'`: inputs must have
@@ -221,7 +226,7 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 from runtime import Handler
 
 class Trellis2(Handler):
-    def load(self):        # 512-only pipeline from /kaggle/input/trellis2-512-weights, fp16, low_vram
+    def load(self):        # pipeline_512.from_ready(): 512-only, fp16 flows, low_vram, paths from setup.sh
         ...
     def warmup(self):      # one tiny job so Triton kernels compile and FlexGEMM autotunes before real jobs
                            # (FLEX_GEMM_AUTOTUNE_CACHE_PATH under /kaggle/working; allow_tf32 off below cc 8.0)
@@ -263,14 +268,20 @@ and NOTICE.
 
 ## Kaggle workflow
 
-1. **Build run (once, web UI so secrets work):** compile wheels, download DINOv3 with an `HF_TOKEN` secret,
-   export the 512-only fp16 weights to `/kaggle/working`. Create the datasets `trellis2-t4-wheels` and
-   `trellis2-512-weights` from the output. Pin the notebook's environment.
+1. **Build run (once):** compile the extension wheels into the dataset `trellis2-t4-wheels`. Pin the
+   notebook's environment. (DINOv3 is already a dataset, see problem 5.)
+   **Weights per session (built in `setup.sh`):** a Kaggle dataset mount read 8 GB in about 6 min in the
+   kimodo runs, against about 2 min from Hugging Face plus 7 s from `/tmp`. So only what can't come from
+   Hugging Face comes from a dataset: DINOv3 (gated; secrets don't reach API-pushed runs) is copied from
+   `/kaggle/input` to `/tmp` in the background while the open 512 files (about 9.8 GB, `pipeline_512.weight_files`)
+   download from Hugging Face to `/tmp/trellis2-weights`. One copy per session, shared by both workers
+   (lock); `ready.json` records the paths for `pipeline_512.from_ready()`.
 2. **Test run (once):** parity fp16 against fp32, peak VRAM and RAM with one and two workers, Triton against
    the spconv backend, FlexGEMM autotuning time (save the cache), time per job. Write the numbers into this document.
-3. **Production sessions:** attach both datasets, then
+3. **Production sessions:** attach the datasets (`kaggle_run.py --dataset $KUSER/dinov3-vitl16-hf`), then
    ```python
-   SESSION_ARGS = ('--session kaggleA --phases preflight,install,workers '
+   SESSION_ARGS = ('--session kaggleA --phases preflight,install,trellis2,workers '
+                   '--cmd "trellis2=bash worker/trellis2_t4/setup.sh" '
                    '--requirements requirements/trellis2-t4.txt '
                    '--worker-args "--handler trellis2=handlers.trellis2:Trellis2" '
                    '--worker-idle-exit 600 --budget-minutes 700')
