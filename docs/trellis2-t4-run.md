@@ -1,7 +1,6 @@
 # TRELLIS.2 on Kaggle T4 x2: run protocol (terminal)
 
 The same steps every time, from the laptop's terminal. Background and design: [trellis2.md](trellis2.md).
-Meta's DINOv3: [../DINOv3-META.md](../DINOv3-META.md).
 
 **State (2026-11-17):** everything below is built and tested on the laptop (with fakes), but **has not run on
 Kaggle yet**. The first session is the real test; expect to fix things after it.

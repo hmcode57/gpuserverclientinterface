@@ -153,8 +153,7 @@ stage in fp32, recording that in the job metrics. The parity tool (below) measur
   (from the facebookresearch/dinov3 download links) was converted on the laptop with transformers'
   `convert_dinov3_vit_to_hf.py`, which checked the output against Meta's reference values, and uploaded as the
   **private** Kaggle dataset `$KUSER/dinov3-vitl16-hf` (your account) (1.21 GB, fp32), with Meta's licence in the dataset
-  as the DINOv3 License requires. Sharing is allowed only under that licence; details and credits in
-  `DINOv3-META.md`. Only ViT-L/16 LVD-1689M fits: the flow models expect its 1024-wide features.
+  as the DINOv3 License requires. Sharing is allowed only under that licence, with a copy of it. Only ViT-L/16 LVD-1689M fits: the flow models expect its 1024-wide features.
 - **Background removal:** `pipeline.json` points to `briaai/RMBG-2.0`, reported as CC BY-NC 4.0 (no
   commercial use). *Verified:* it is loaded on every start, and skipped at inference only when the input has
   an alpha channel. Fix (built): `pipeline_512` doesn't load it by default (`rembg='none'`: inputs must have

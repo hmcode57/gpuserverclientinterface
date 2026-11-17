@@ -1,6 +1,6 @@
 # Sources and licences (trellis2_t4)
 
-Credits for everything except Meta's DINOv3, which has its own file: `DINOv3-META.md` in the repository root.
+Credits for everything except Meta's DINOv3, whose licence copy lives with the weights (`LICENSE.md` in the private DINOv3 dataset).
 
 Where the code and models used by `worker/trellis2_t4/` come from. The files themselves carry no source notes;
 this list is the record. Licences checked on 2026-11-17; recheck before publishing anything.
