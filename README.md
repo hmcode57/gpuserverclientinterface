@@ -1,4 +1,9 @@
-# gpuserverclientinterface
+# gpuserverclientinterface (branch `trellis2-t4`)
+
+> This branch runs **TRELLIS.2 on Kaggle T4s**: start with [docs/trellis2-t4-run.md](docs/trellis2-t4-run.md)
+> (how to run it) and [docs/trellis2.md](docs/trellis2.md) (design). Parts of the framework that TRELLIS.2
+> doesn't use were removed here (DiLoCo training, the R2 object store, the `torch_matmul` demo, the tunnel
+> acceptance script, `examples/`); they are still on `main`. Text below that mentions them describes `main`.
 
 Run GPU jobs on free or temporary notebook GPUs (Kaggle, Colab, any rented box) while your laptop stays in
 charge. The laptop holds a durable job queue; notebook workers connect **out** to it through an HTTPS tunnel,
@@ -26,9 +31,6 @@ It works in two ways:
 - **Independent jobs** (the default): every GPU in every session pulls the next job from one queue. Run as
   many notebooks as you like, on your own and your teammates' accounts
   ([docs/multi-session.md](docs/multi-session.md)).
-- **One LoRA adapter trained across sessions** with DiLoCo: both GPUs of a session train together with
-  torchrun, and sessions sync every few hundred steps through Cloudflare R2, so weights never touch your home
-  connection ([docs/diloco.md](docs/diloco.md)).
 
 ## What this framework is useful for
 
@@ -153,13 +155,6 @@ accounts); every worker pulls from the same queue. Give each notebook its own `-
 don't fully trust the restricted `run/worker_token`, and use a named tunnel or `QUEUE_URL_GIST` so a laptop
 restart doesn't strand them. Details in [docs/multi-session.md](docs/multi-session.md).
 
-### Training one LoRA adapter across sessions
-
-`laptop/diloco_train.py` trains one LoRA adapter on several sessions at once with DiLoCo: inside a session
-both GPUs run DDP under torchrun, and sessions sync every few hundred steps through Cloudflare R2 via presigned
-URLs, so weights never touch your home connection. Sessions can die, stall or join mid-run. Details,
-R2 setup and settings in [docs/diloco.md](docs/diloco.md).
-
 ## Writing a handler
 
 ```python
@@ -188,8 +183,7 @@ class Generate(Handler):
 Start workers with `--handler llm=my_handlers.llm:Generate --opt model=gpt2`, then submit jobs with
 `--family llm`. Inside `run`, `ctx` gives you `params`, `input(name)`, `output(name, data)`, `config()`,
 `progress(**fields)` and `check()`. Full reference: [docs/architecture.md](docs/architecture.md#handlers).
-Two examples ship with the repo: `worker/handlers/echo.py` (no dependencies) and
-`worker/handlers/torch_matmul.py` (a GPU benchmark reporting TFLOPS).
+An example ships with the repo: `worker/handlers/echo.py` (no dependencies).
 
 ## Resuming long jobs
 
@@ -224,17 +218,13 @@ your connection, and the laptop has to stay on.
 | `worker/client.py` | Queue client for workers, the CLI and your own code (stdlib only) |
 | `worker/runtime.py` | Long-lived worker: claim loop, heartbeats, handler loading and swapping, metrics, exit codes |
 | `worker/supervise.py` | One worker per GPU (or one for all GPUs with `--gpus all`), restart on crash |
-| `worker/handlers/` | Example handlers |
+| `worker/handlers/` | Example handler (`echo`) |
+| `worker/trellis2_t4/` | TRELLIS.2: setup script, sdpa patch, 512-only fp16 loader |
 | `worker/fake_worker.py` | Bare protocol test worker (no runtime) |
-| `laptop/diloco_train.py` | DiLoCo driver: schedules rounds of LoRA training across sessions, resumable |
-| `laptop/objstore.py` | R2/S3 presigned URLs (SigV4, stdlib only) |
-| `worker/diloco/` | DiLoCo handler, torch inner loop (torchrun), outer step, recipes (HF + PEFT LoRA, toy) |
-| `examples/diloco/` | Example DiLoCo recipe config |
 | `tools/notebook/` | Notebook cell, session driver, report summariser, Kaggle CLI runner |
-| `tools/public_tunnel_acceptance.sh` | End-to-end test through a real Cloudflare tunnel |
 | `configs/` | Immutable versioned job configs |
-| `tests/` | Queue, protocol-hardening, runtime, multi-session and DiLoCo tests |
-| `docs/` | Architecture and protocol reference, notebook guide, multi-session guide, DiLoCo guide |
+| `tests/` | Queue, protocol-hardening, runtime, multi-session and TRELLIS.2 tests |
+| `docs/` | Architecture and protocol reference, notebook guide, multi-session guide, TRELLIS.2 design and run protocol |
 
 ## Tests
 
@@ -243,8 +233,7 @@ python3 tests/test_queue.py            # queue behaviour over real HTTP
 python3 tests/test_queue_hardening.py  # leases, retries, limits, timeouts, traversal
 python3 tests/test_runtime.py          # worker runtime + supervisor (CPU only)
 python3 tests/test_multi_session.py    # worker token, URL discovery, unique session ids
-python3 tests/test_diloco.py           # DiLoCo math + end-to-end on CPU (needs torch; skips without it)
-bash tools/public_tunnel_acceptance.sh # through a real Cloudflare quick tunnel (needs cloudflared + internet)
+python3 tests/test_trellis2.py         # TRELLIS.2 setup; the torch parts need TRELLIS2_SRC (see the file)
 ```
 
 ## Limits

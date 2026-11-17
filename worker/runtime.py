@@ -1,7 +1,7 @@
 """Generic long-lived worker: one process per GPU, pulls jobs from the queue, runs them with a handler.
 
   QUEUE_URL=... QUEUE_TOKEN=... CUDA_VISIBLE_DEVICES=0 \
-      python3 worker/runtime.py --handler echo=handlers.echo:Echo [--handler gemm=handlers.torch_matmul:Matmul]
+      python3 worker/runtime.py --handler echo=handlers.echo:Echo
 
 Each --handler maps a job family to a Handler class ("module:Class", importable from worker/ or the current
 directory). Only one handler (one model family) is resident at a time: the first one loads at startup, the
