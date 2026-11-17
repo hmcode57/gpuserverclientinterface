@@ -305,31 +305,58 @@ class Weights(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which("git") and shutil.which("flock"), "needs git and flock")
 class SetupScript(unittest.TestCase):
+    """setup.sh end to end without TRELLIS.2: a small fake upstream repo with its own patch, a fake DINOv3
+    dataset and a stand-in Hugging Face hub. Extensions are skipped (they need nvcc and torch)."""
+
+    def fake_upstream(self, tmp):
+        repo, patches = os.path.join(tmp, "upstream"), os.path.join(tmp, "patches")
+        os.makedirs(os.path.join(repo, "pkg")); os.makedirs(patches)
+        git = lambda *a: subprocess.run(["git", "-C", repo, *a], check=True, capture_output=True, text=True).stdout
+        git("init", "-q"); git("config", "user.email", "t@t"); git("config", "user.name", "t")
+        with open(os.path.join(repo, "pkg", "config.py"), "w") as f:
+            f.write("BACKENDS = ['xformers', 'flash_attn']\n")
+        git("add", "."); git("commit", "-qm", "upstream")
+        commit = git("rev-parse", "HEAD").strip()
+        with open(os.path.join(repo, "pkg", "config.py"), "w") as f:
+            f.write("BACKENDS = ['xformers', 'flash_attn', 'sdpa']\n")
+        with open(os.path.join(patches, "0001-fake.patch"), "w") as f:
+            f.write(git("diff"))
+        git("checkout", "-q", "--", ".")
+        return repo, commit, patches
+
     def run_setup(self, tmp, **env):
+        repo, commit, patches = self.fake_upstream(tmp) if not os.path.isdir(os.path.join(tmp, "upstream")) else \
+            (os.path.join(tmp, "upstream"), self.commit, os.path.join(tmp, "patches"))
+        self.commit = commit
+        hub = fake_hub_dir(tmp) if not os.path.isdir(os.path.join(tmp, "fakehub")) else os.path.join(tmp, "fakehub")
         e = dict(os.environ, TRELLIS2_HOME=os.path.join(tmp, "home"), TRELLIS2_INPUT=os.path.join(tmp, "input"),
                  TRELLIS2_WEIGHTS=os.path.join(tmp, "weights"), TRELLIS2_DINO=os.path.join(tmp, "dino"),
-                 PYTHONPATH=fake_hub_dir(tmp) if not os.path.isdir(os.path.join(tmp, "fakehub")) else
-                 os.path.join(tmp, "fakehub"), FAKE_HUB_LOG=os.path.join(tmp, "hub.log"), **env)
+                 TRELLIS2_REPO=repo, TRELLIS2_COMMIT=commit, TRELLIS2_PATCHES=patches, TRELLIS2_SKIP_EXT="1",
+                 PYTHONPATH=hub, FAKE_HUB_LOG=os.path.join(tmp, "hub.log"), **env)
         return subprocess.run(["bash", os.path.join(ROOT, "worker/trellis2_t4/setup.sh")], env=e,
                               capture_output=True, text=True, timeout=600)
 
     def fake_dino_dataset(self, tmp):
         d = os.path.join(tmp, "input", "dinov3-vitl16-hf")
         os.makedirs(d)
-        json.dump({"model_type": "dinov3_vit", "hidden_size": 1024}, open(os.path.join(d, "config.json"), "w"), indent=2)
-        open(os.path.join(d, "model.safetensors"), "wb").write(os.urandom(4096))
+        with open(os.path.join(d, "config.json"), "w") as f:
+            json.dump({"model_type": "dinov3_vit", "hidden_size": 1024}, f, indent=2)
+        with open(os.path.join(d, "model.safetensors"), "wb") as f:
+            f.write(os.urandom(4096))
         return d
 
     def test_end_to_end(self):
         with tempfile.TemporaryDirectory() as tmp:
             src = self.fake_dino_dataset(tmp)
             r = self.run_setup(tmp)
-            if r.returncode and "Could not resolve host" in r.stderr:
-                self.skipTest("offline: cannot clone TRELLIS.2")
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-            ready = json.load(open(os.path.join(tmp, "home", "ready.json")))
-            self.assertEqual(ready["patches"], ["0001-sparse-sdpa.patch"])
-            self.assertIn("'sdpa'", open(os.path.join(ready["src"], "trellis2/modules/sparse/config.py")).read())
+            with open(os.path.join(tmp, "home", "ready.json")) as f:
+                ready = json.load(f)
+            self.assertEqual(ready["patches"], ["0001-fake.patch"])
+            self.assertEqual(ready["commit"], self.commit)
+            self.assertIs(ready["extensions"], False)
+            with open(os.path.join(ready["src"], "pkg/config.py")) as f:
+                self.assertIn("'sdpa'", f.read())                    # the patch was applied
             with open(os.path.join(ready["dino"], "model.safetensors"), "rb") as a, \
                  open(os.path.join(src, "model.safetensors"), "rb") as b:
                 self.assertEqual(a.read(), b.read())
@@ -340,6 +367,19 @@ class SetupScript(unittest.TestCase):
             again = self.run_setup(tmp)                              # second GPU's phase: nothing to do
             self.assertEqual(again.returncode, 0)
             self.assertIn("already set up", again.stdout)
+
+    def test_patch_that_no_longer_applies_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.fake_dino_dataset(tmp)
+            repo, commit, patches = self.fake_upstream(tmp)
+            self.commit = commit
+            with open(os.path.join(patches, "0001-fake.patch")) as f:
+                text = f.read()
+            with open(os.path.join(patches, "0001-fake.patch"), "w") as f:
+                f.write(text.replace("-BACKENDS = ['xformers', 'flash_attn']", "-BACKENDS = ['something else']"))
+            r = self.run_setup(tmp)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertFalse(os.path.exists(os.path.join(tmp, "home", "ready.json")))
 
     def test_missing_dino_dataset_fails_early(self):
         with tempfile.TemporaryDirectory() as tmp:

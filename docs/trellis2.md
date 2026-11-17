@@ -296,7 +296,7 @@ Each GLB is a few MB at about 50k faces with 1024 px textures.
 
 1. **CPU-tested patches (done 2026-11-17):** sdpa backend, 512-only loader, fp16 flow models.
 2. **One Kaggle test run:** build wheels and weights, parity, memory, Triton. Answers problems 1–4.
-3. **Handler, config and viewer.** The viewer can be built earlier, tested with the `echo` handler.
+3. **Handler, config and viewer.** Handler, config, extension build and wheels dataset built 2026-11-17 (tested with fakes, not on Kaggle yet); viewer still to do. Run steps: `trellis2-t4-run.md`.
 4. **Production:** seed sweeps through the viewer; stage-split mode and a kimodo family only if needed.
 
 ## Open questions (answered by milestone 2)

@@ -1,0 +1,11 @@
+# Pure-Python dependencies of the TRELLIS.2 512 pipeline and GLB export, for the session's install phase
+# (--requirements worker/trellis2_t4/requirements.txt). Never torch: the notebook's own CUDA build is used.
+# The compiled extensions (cumesh, flex_gemm, nvdiffrast, o_voxel) come from worker/trellis2_t4/setup.sh.
+easydict
+plyfile
+zstandard
+trimesh
+transformers>=4.56
+safetensors
+huggingface_hub
+# opencv (cv2) and Pillow: use the notebook's preinstalled ones; a second OpenCV package would clash.

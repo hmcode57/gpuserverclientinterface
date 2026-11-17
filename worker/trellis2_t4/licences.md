@@ -15,6 +15,22 @@ this list is the record. Licences checked on 2026-11-17; recheck before publishi
 | `pipeline_512.py` | Ours. The idea of dropping the two 1024 flow models from `pipeline.json` and replacing the background remover also appears in [vidproject1/trellis2-kaggle-bootstrap](https://github.com/vidproject1/trellis2-kaggle-bootstrap) `runtime.py` (untested there; no code copied). | this repo | (ours) |
 | `tests/test_trellis2.py` | Ours. | this repo | (ours) |
 | `tools/notebook/kaggle_run.py` (`--dataset`) | Ours. | this repo | (ours) |
+| `worker/handlers/trellis2.py`, `configs/trellis2-stylized/v1.json`, `tests/test_trellis2_handler.py` | Ours. The `to_glb` call and its arguments follow TRELLIS.2's `example.py`. | this repo | (ours) |
+| `tools/notebook/trellis2_datasets.py` | Ours; same approach as `tools/notebook/kimodo_datasets.py` on the `kimodo-t4` branch. | this repo | (ours) |
+| `requirements.txt` | Ours; the package list follows TRELLIS.2's `setup.sh` and `o-voxel/pyproject.toml`. | this repo | (ours) |
+
+## Compiled at run time on Kaggle (sources fetched by `setup.sh`, not stored here)
+
+The wheels saved to the private dataset `trellis2-t4-wheels` are builds of these.
+
+| Package | Pinned at | Source | Licence |
+|---|---|---|---|
+| cumesh | `12289e1062f0603f2f0d0771b02e1395d247f26f` (2026-05-09) | [JeffreyXiang/CuMesh](https://github.com/JeffreyXiang/CuMesh) | MIT |
+| cubvh (CuMesh submodule, branch `trellis.2`) | as pinned by CuMesh | [JeffreyXiang/cubvh](https://github.com/JeffreyXiang/cubvh), fork of [ashawkey/cubvh](https://github.com/ashawkey/cubvh) | MIT |
+| flex_gemm | `6dd94a859c26ee8246888502eada3dd8ad85532e` (2026-04-22) | [JeffreyXiang/FlexGEMM](https://github.com/JeffreyXiang/FlexGEMM) | MIT |
+| nvdiffrast | tag `v0.4.0` = `253ac4fcea7de5f396371124af597e6cc957bfae` | [NVlabs/nvdiffrast](https://github.com/NVlabs/nvdiffrast) | **NVIDIA Source Code License (1-Way Commercial)**: read its terms before any commercial use |
+| o_voxel | TRELLIS.2 commit above (`o-voxel/`) | [microsoft/TRELLIS.2](https://github.com/microsoft/TRELLIS.2) | MIT |
+| Eigen (o-voxel submodule, headers) | as pinned by TRELLIS.2 | [libeigen/eigen](https://gitlab.com/libeigen/eigen) | MPL-2.0 (mostly) |
 
 MIT requires keeping the copyright and permission notice with copies of substantial portions: TRELLIS.2
 (Copyright (c) Microsoft Corporation) and ComfyUI-Trellis2 (see its `LICENSE`).

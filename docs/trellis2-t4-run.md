@@ -3,10 +3,8 @@
 The same steps every time, from the laptop's terminal. Background and design: [trellis2.md](trellis2.md).
 Meta's DINOv3: [../DINOv3-META.md](../DINOv3-META.md).
 
-**State (2026-11-17):** what runs today is the **setup check**: a Kaggle session that clones and patches
-TRELLIS.2, downloads the 512 weights from Hugging Face and copies DINOv3 from your private dataset, then stops.
-**Generating 3D models is not built yet** (needs the CUDA extension build and the handler; Part 5 is the
-placeholder). This document is updated as those land.
+**State (2026-11-17):** everything below is built and tested on the laptop (with fakes), but **has not run on
+Kaggle yet**. The first session is the real test; expect to fix things after it.
 
 Everything runs **in a terminal on the laptop, from the project folder**:
 
@@ -19,7 +17,7 @@ KUSER=$(kaggle config view | awk '/username:/ {print $3}'); echo "$KUSER"   # ev
 | When | Do |
 |---|---|
 | Once | Part 1 |
-| Every session | Part 2 (laptop), Part 3 (start on Kaggle), Part 4 (check) |
+| Every session | Part 2 (laptop), Part 3 (start on Kaggle), Part 4 (check), Part 5 (generate) |
 | At the end | Part 6 |
 
 ---
@@ -81,59 +79,88 @@ python3 tools/notebook/kaggle_run.py --kernel $KUSER/trellis2-t4 --mode probe --
 `/health 200` and `/bundle 200` = the notebook reaches the laptop. `/health 401` = token mismatch (redo 1.2, or
 add `--make-token-dataset` to upload this folder's token). `PROBE secret error: ConnectionError` is normal.
 
-### 3.2 Setup check (T4 x2, about 5–10 minutes, no workers)
+### 3.2 Start the session (T4 x2)
 
 ```bash
 python3 tools/notebook/kaggle_run.py --kernel $KUSER/trellis2-t4 --mode run \
     --token-dataset $KUSER/gpuq-token --dataset $KUSER/dinov3-vitl16-hf \
-    --session-args '--session kaggleA --phases preflight,trellis2 --cmd "trellis2=bash worker/trellis2_t4/setup.sh" --budget-minutes 30'
+    --session-args '--session kaggleA --phases preflight,install,trellis2,workers --requirements worker/trellis2_t4/requirements.txt --cmd "trellis2=bash worker/trellis2_t4/setup.sh" --worker-args "--handler trellis2=handlers.trellis2:Trellis2" --worker-idle-exit 900 --budget-minutes 120'
 ```
 
-Every push replaces the notebook's inputs, so the two `--dataset`/`--token-dataset` flags must be on every
-command. It pushes the notebook as a new version, starts it and follows its log. `Ctrl-C` only stops
-following; show it again with:
+- After 3.3 (saved build) add `--dataset $KUSER/trellis2-t4-wheels`; `python3 tools/notebook/trellis2_datasets.py status`
+  prints the flags. Every push replaces the notebook's inputs, so all `--dataset`/`--token-dataset` flags go on
+  every command.
+- Only the setup, no workers: `--phases preflight,install,trellis2` (drop `--worker-args`).
+- It pushes the notebook as a new version, starts it and follows its log. `Ctrl-C` only stops following:
+  `python3 tools/notebook/kaggle_run.py --kernel $KUSER/trellis2-t4 --logs` shows it again.
+- `QUEUED` = waiting for a free T4 x2 (GPU hours don't count yet; don't push again).
+
+Phases: `preflight` (hardware), `install` (pure-Python packages), `trellis2` (setup.sh: TRELLIS.2 source and
+patch, weights download and DINOv3 copy in the background, the CUDA extension build), `workers` (one per GPU,
+each loads the pipeline, runs a short warm-up, then takes jobs). **The first session compiles the extensions;
+how long that takes is not measured yet.**
+
+### 3.3 Save the build (once, after the first session whose `trellis2` phase ended `ok=True`)
 
 ```bash
-python3 tools/notebook/kaggle_run.py --kernel $KUSER/trellis2-t4 --logs
+python3 tools/notebook/trellis2_datasets.py wheels
 ```
 
-`QUEUED` = waiting for a free T4 x2 (GPU hours don't count yet; don't push again).
+It takes the compiled wheels from the latest run of `$KUSER/trellis2-t4` and uploads them as the private
+dataset `$KUSER/trellis2-t4-wheels`. setup.sh installs from it only when it was built for the same Python,
+torch, CUDA and source commits (`trellis2-t4-wheels.txt`); after Kaggle updates its image it builds again,
+and you run this again.
 
 ---
 
-## Part 4: check the result
+## Part 4: check the setup
 
 ```bash
+python3 laptop/submit.py --workers                  # ready = trellis2 loaded on that GPU
 python3 tools/notebook/report.py                    # latest session: phases, ok, times, RAM peaks
 less data/reports/kaggleA/trellis2_gpu*.log         # one GPU's log does the work, the other says "already set up"
 ```
 
-The log that did the work ends with:
+The setup log that did the work ends with lines like:
 
 ```text
-[trellis2-setup +Ns] DINOv3: copying /kaggle/input/.../dinov3-vitl16-hf -> /tmp/dinov3-vitl16-hf in the background
-[trellis2-setup +Ns] source at 75fbf01..., patches applied
+[trellis2-setup +Ns] extensions: built CuMesh in Ns          (or: installing the wheels from /kaggle/input/...)
+[trellis2-setup +Ns] extensions: cumesh, flex_gemm, nvdiffrast, o_voxel import
 [trellis2-setup +Ns] weights done: 9.8G
 [trellis2-setup +Ns] DINOv3 done: 1.2G
-[trellis2-setup +Ns] ready: {"commit":...,"dino":"/tmp/dinov3-vitl16-hf","weights":{...}}
+[trellis2-setup +Ns] ready: {...}
 ```
 
-Write the times of `weights done` and `DINOv3 done` into `trellis2.md` (they are the first real numbers).
+Write the times into `trellis2.md` (they are the first real numbers). If a build step fails, the log names
+`build_<package>.log`; it is in the notebook output under `trellis2/`.
 
 ---
 
-## Part 5: generate 3D models (not built yet)
+## Part 5: generate 3D models
 
-Needs the CUDA extension build (cumesh, o_voxel, nvdiffrast, flex_gemm) and `worker/handlers/trellis2.py`.
-Then the session gets a `workers` phase and you submit images with `laptop/submit.py`; this part will
-describe it.
+Input: a PNG with a **transparent background** (RGBA). For images with a background, start the workers with
+`--worker-args "--handler trellis2=handlers.trellis2:Trellis2 --opt rembg=ZhengPeng7/BiRefNet"` (MIT model).
+
+```bash
+python3 laptop/submit.py --kind generate --family trellis2 --config trellis2-stylized@1 \
+    --params '{"seed": 3}' --file image.png=character.png --output model.glb --output result.json
+# prints the job id; then
+python3 laptop/submit.py --list                                     # state: queued / running / done / failed
+python3 laptop/submit.py --get JOB_ID model.glb > character.glb
+python3 laptop/submit.py --get JOB_ID result.json                   # settings, timings, faces, fp32 fallback
+```
+
+Settings (`--params`, override `configs/trellis2-stylized/v1.json`): `seed`, `texture_size` (default 1024),
+`decimation_target` (faces, default 50000), `remesh`, `remesh_band`, `remesh_project`, and sampler steps
+`sparse_structure_steps`, `shape_steps`, `tex_steps` (upstream default 12 each). Several seeds: submit several
+jobs; both GPUs take jobs in parallel. Jobs can be submitted before the workers are ready; they wait.
 
 ---
 
 ## Part 6: end the session
 
-1. The setup check stops by itself after its phases (or at `--budget-minutes`) and uploads its report first.
-   A running session can be stopped on kaggle.com → the notebook → *Cancel run*.
+1. Workers stop after 15 idle minutes (`--worker-idle-exit 900`) or at `--budget-minutes`, and the session
+   uploads its report first. Stop earlier on kaggle.com → the notebook → *Cancel run*.
 2. The queue on the laptop can keep running for the next session; stop it with `Ctrl-C` in its terminal.
 
 ---

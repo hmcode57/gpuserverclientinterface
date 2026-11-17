@@ -1,0 +1,9 @@
+{
+  "_note": "TRELLIS.2 512 settings for stylized/cartoon assets (worker/handlers/trellis2.py). Never edit a published version: copy it to v2.json.",
+  "seed": 42,
+  "texture_size": 1024,
+  "decimation_target": 50000,
+  "remesh": true,
+  "remesh_band": 1,
+  "remesh_project": 0
+}
